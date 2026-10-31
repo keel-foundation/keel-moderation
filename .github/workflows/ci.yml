@@ -1,0 +1,9 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  compile:
+    uses: keel-foundation/.github/.github/workflows/python-ci.yml@main
