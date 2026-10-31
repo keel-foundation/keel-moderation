@@ -2,38 +2,60 @@
 
 The moderation and content-protection service: signals, cases, human review, appeals, audit ledger, and transparency aggregates.
 
-**Status:** scaffold. Only `/health` and an empty `/v1/policies` exist.
+**Status:** local demo. It models an automated signal, a case, an enforcement action, an independent appeal review, and an append-only hash-chained ledger. There is no database, production authentication, real classifier, review queue, or transparency generator yet.
 
-## Responsibilities
+## Endpoints
 
-- Ingest signals from automation, user reports, priority flaggers, and legal orders.
-- Open cases and assemble evidence bundles.
-- Enforce human review gates and penalty ranges from the Constitution.
-- Record every action, review, and appeal in a hash-chained ledger.
-- Generate the quarterly transparency report and Creator Trust Index.
-- Run content protection: piracy matching, impersonation, spam/scam/fraud signals.
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness |
+| `GET` | `/v1/policies` | Active demo policy |
+| `GET` | `/v1/demo/state` | Current action, appeal, case, ledger, verification |
+| `POST` | `/v1/demo/reset` | Clear action state and append a reset record |
+| `POST` | `/v1/actions` | Create a demo enforcement action |
+| `POST` | `/v1/actions/{action_id}/appeal` | File an appeal |
+| `POST` | `/v1/appeals/{appeal_id}/decide` | Decide an appeal |
+| `GET` | `/v1/ledger` | Ledger and verification result |
+| `GET` | `/v1/ledger/verify` | Verify the hash chain |
+| `GET` | `/v1/ledger/export?format=jsonl\|csv` | Export the ledger |
 
-## Layout
+Mutating endpoints accept an optional `Authorization: Bearer <token>` when `TUBEKEEL_DEMO_TOKEN` is set.
 
-```
-app/main.py           FastAPI entrypoint
-app/policies/         policy bundles as code (to be added)
-app/classifiers/      signal classifiers and model adapters (to be added)
-```
+## Ledger properties
+
+- Each record has `seq`, `type`, `at`, `payload`, `prev_hash`, and `hash`.
+- `hash = SHA-256(canonical_json({seq, type, at, payload, prev_hash}))`.
+- The first record uses `prev_hash: "GENESIS"`.
+- Records are appended to a JSONL file and verified on load.
+- `POST /v1/demo/reset` clears action state but appends a reset record; it never truncates the ledger.
+- The ledger can be verified and exported through the API. There is no external anchor yet.
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TUBEKEEL_LEDGER_PATH` | `data/ledger.jsonl` | Append-only ledger file |
+| `TUBEKEEL_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
+| `TUBEKEEL_RATE_LIMIT` | `30` | Mutating requests per IP per minute; `0` disables |
+| `TUBEKEEL_DEMO_TOKEN` | unset | Optional bearer token for mutating endpoints |
 
 ## Run
 
 ```sh
 python3 -m venv .venv
-. .venv/bin/activate
-pip install -e .
-uvicorn app.main:app --reload --port 8082
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8082
+.venv/bin/pytest -q
 ```
 
 ## Next
 
-1. Define the `Signal`, `ModerationCase`, `EnforcementAction`, and `Appeal` schemas.
-2. Add the policy bundle loader and versioning.
-3. Add the append-only, hash-chained ledger.
-4. Add the human review queue and SLA timers.
+1. Replace the JSONL demo ledger with a PostgreSQL append-only ledger and periodic anchor.
+2. Add the policy bundle loader and signed policy versioning.
+3. Add the review queue and SLA timers.
+4. Add a real signal-ingestion API and classifier adapters.
 5. Add the transparency report generator.
+
+## Licensing
+
+AGPL-3.0. See [LICENSE](LICENSE).
