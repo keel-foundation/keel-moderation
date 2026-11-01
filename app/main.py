@@ -17,7 +17,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def env_list(name: str, default: str) -> list[str]:
@@ -182,6 +182,8 @@ class Ledger:
 
 
 class ActionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     video_id: str = Field(pattern=r"^vid_[a-zA-Z0-9_]+$", max_length=80)
     policy_clause: str = Field(default="spam.mass_production", min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=2000)
@@ -189,6 +191,8 @@ class ActionCreate(BaseModel):
 
 
 class AppealCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     grounds: Literal[
         "new_evidence",
         "procedural_error",
@@ -200,6 +204,8 @@ class AppealCreate(BaseModel):
 
 
 class AppealDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     decision: Literal["reverse", "uphold"]
     reasoning: str = Field(min_length=1, max_length=4000)
 
