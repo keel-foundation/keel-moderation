@@ -1,1 +1,1 @@
-"""TubeKeel moderation service."""
+"""KeelTube moderation service."""

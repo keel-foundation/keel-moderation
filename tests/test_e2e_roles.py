@@ -21,9 +21,9 @@ APPEALS = {"Authorization": "Bearer appeals-token"}
 
 
 def test_end_to_end_flow_records_actor_in_ledger(client, monkeypatch):
-    monkeypatch.setenv("TUBEKEEL_CREATOR_TOKEN", "creator-token")
-    monkeypatch.setenv("TUBEKEEL_MODERATOR_TOKEN", "moderator-token")
-    monkeypatch.setenv("TUBEKEEL_APPEALS_TOKEN", "appeals-token")
+    monkeypatch.setenv("KEELTUBE_CREATOR_TOKEN", "creator-token")
+    monkeypatch.setenv("KEELTUBE_MODERATOR_TOKEN", "moderator-token")
+    monkeypatch.setenv("KEELTUBE_APPEALS_TOKEN", "appeals-token")
 
     action = client.post("/v1/actions", json=ACTION_PAYLOAD, headers=MODERATOR).json()
     appeal = client.post(

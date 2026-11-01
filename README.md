@@ -37,7 +37,7 @@ identity. This is for local development only. Never expose it to a network.
 
 ### Legacy demo token
 
-Set `TUBEKEEL_DEMO_TOKEN`. The same bearer token simulates the whole flow, using the fixed demo
+Set `KEELTUBE_DEMO_TOKEN`. The same bearer token simulates the whole flow, using the fixed demo
 identities (`creator:demo`, `demo-reviewer`, `demo-appeals-reviewer`). This keeps the existing
 web demo working.
 
@@ -47,9 +47,9 @@ Set all three tokens to distinct values:
 
 | Variable | Role | Principal |
 |---|---|---|
-| `TUBEKEEL_CREATOR_TOKEN` | `creator` | `creator:demo` |
-| `TUBEKEEL_MODERATOR_TOKEN` | `moderator` | `demo-reviewer` |
-| `TUBEKEEL_APPEALS_TOKEN` | `appeals` | `demo-appeals-reviewer` |
+| `KEELTUBE_CREATOR_TOKEN` | `creator` | `creator:demo` |
+| `KEELTUBE_MODERATOR_TOKEN` | `moderator` | `demo-reviewer` |
+| `KEELTUBE_APPEALS_TOKEN` | `appeals` | `demo-appeals-reviewer` |
 
 Then:
 
@@ -72,8 +72,8 @@ public network. Production must add read authorization, per-creator scoping, and
 
 ## Persistence
 
-- Workflow state (cases, actions, appeals) is stored in SQLite at `TUBEKEEL_STATE_DB`.
-- The audit ledger remains append-only JSONL at `TUBEKEEL_LEDGER_PATH`.
+- Workflow state (cases, actions, appeals) is stored in SQLite at `KEELTUBE_STATE_DB`.
+- The audit ledger remains append-only JSONL at `KEELTUBE_LEDGER_PATH`.
 - State survives a restart. The ledger is verified on load.
 - `POST /v1/demo/reset` clears the workflow tables but appends a `demo.reset` ledger record; it
   never truncates the ledger.
@@ -94,14 +94,14 @@ public network. Production must add read authorization, per-creator scoping, and
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TUBEKEEL_LEDGER_PATH` | `data/ledger.jsonl` | Append-only ledger file |
-| `TUBEKEEL_STATE_DB` | `data/state.sqlite3` | SQLite workflow state |
-| `TUBEKEEL_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
-| `TUBEKEEL_RATE_LIMIT` | `30` | Mutating requests per IP per minute; `0` disables |
-| `TUBEKEEL_DEMO_TOKEN` | unset | Legacy single-token demo mode |
-| `TUBEKEEL_CREATOR_TOKEN` | unset | Creator token for role-enforced mode |
-| `TUBEKEEL_MODERATOR_TOKEN` | unset | Moderator token for role-enforced mode |
-| `TUBEKEEL_APPEALS_TOKEN` | unset | Appeals reviewer token for role-enforced mode |
+| `KEELTUBE_LEDGER_PATH` | `data/ledger.jsonl` | Append-only ledger file |
+| `KEELTUBE_STATE_DB` | `data/state.sqlite3` | SQLite workflow state |
+| `KEELTUBE_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
+| `KEELTUBE_RATE_LIMIT` | `30` | Mutating requests per IP per minute; `0` disables |
+| `KEELTUBE_DEMO_TOKEN` | unset | Legacy single-token demo mode |
+| `KEELTUBE_CREATOR_TOKEN` | unset | Creator token for role-enforced mode |
+| `KEELTUBE_MODERATOR_TOKEN` | unset | Moderator token for role-enforced mode |
+| `KEELTUBE_APPEALS_TOKEN` | unset | Appeals reviewer token for role-enforced mode |
 
 ## Run
 

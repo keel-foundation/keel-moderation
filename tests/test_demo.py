@@ -132,7 +132,7 @@ def test_reset_clears_state_but_keeps_ledger(client):
 def test_demo_token_is_enforced_when_configured(client, monkeypatch):
     from app.main import state
 
-    monkeypatch.setenv("TUBEKEEL_DEMO_TOKEN", "secret")
+    monkeypatch.setenv("KEELTUBE_DEMO_TOKEN", "secret")
     state.reset()
 
     rejected = client.post("/v1/actions", json=ACTION_PAYLOAD)

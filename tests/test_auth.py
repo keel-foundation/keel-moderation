@@ -21,9 +21,9 @@ APPEALS = {"Authorization": "Bearer appeals-token"}
 
 
 def configure_roles(monkeypatch) -> None:
-    monkeypatch.setenv("TUBEKEEL_CREATOR_TOKEN", "creator-token")
-    monkeypatch.setenv("TUBEKEEL_MODERATOR_TOKEN", "moderator-token")
-    monkeypatch.setenv("TUBEKEEL_APPEALS_TOKEN", "appeals-token")
+    monkeypatch.setenv("KEELTUBE_CREATOR_TOKEN", "creator-token")
+    monkeypatch.setenv("KEELTUBE_MODERATOR_TOKEN", "moderator-token")
+    monkeypatch.setenv("KEELTUBE_APPEALS_TOKEN", "appeals-token")
 
 
 def create_action(client) -> dict:
@@ -164,7 +164,7 @@ def test_appellant_cannot_decide_own_appeal(client, monkeypatch):
 
 def test_role_tokens_must_be_distinct(client, monkeypatch):
     configure_roles(monkeypatch)
-    monkeypatch.setenv("TUBEKEEL_APPEALS_TOKEN", "moderator-token")
+    monkeypatch.setenv("KEELTUBE_APPEALS_TOKEN", "moderator-token")
 
     response = client.get("/v1/whoami", headers=MODERATOR)
     assert response.status_code == 500
@@ -172,7 +172,7 @@ def test_role_tokens_must_be_distinct(client, monkeypatch):
 
 
 def test_legacy_demo_token_still_simulates_the_flow(client, monkeypatch):
-    monkeypatch.setenv("TUBEKEEL_DEMO_TOKEN", "legacy-token")
+    monkeypatch.setenv("KEELTUBE_DEMO_TOKEN", "legacy-token")
     headers = {"Authorization": "Bearer legacy-token"}
 
     assert client.post("/v1/actions", json=ACTION_PAYLOAD).status_code == 401

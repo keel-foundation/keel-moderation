@@ -10,9 +10,9 @@ from fastapi import HTTPException, Request
 Role = Literal["creator", "moderator", "appeals", "operator"]
 
 ROLE_ENV = {
-    "creator": "TUBEKEEL_CREATOR_TOKEN",
-    "moderator": "TUBEKEEL_MODERATOR_TOKEN",
-    "appeals": "TUBEKEEL_APPEALS_TOKEN",
+    "creator": "KEELTUBE_CREATOR_TOKEN",
+    "moderator": "KEELTUBE_MODERATOR_TOKEN",
+    "appeals": "KEELTUBE_APPEALS_TOKEN",
 }
 
 # Stable local identities. In role-enforced mode these are the principal IDs that appear in
@@ -24,7 +24,7 @@ ROLE_PRINCIPALS = {
     "operator": "demo:operator",
 }
 
-LEGACY_TOKEN_ENV = "TUBEKEEL_DEMO_TOKEN"
+LEGACY_TOKEN_ENV = "KEELTUBE_DEMO_TOKEN"
 
 
 @dataclass(frozen=True)
@@ -47,8 +47,8 @@ def _role_tokens() -> dict[str, str]:
         raise HTTPException(
             status_code=500,
             detail=(
-                "TUBEKEEL_CREATOR_TOKEN, TUBEKEEL_MODERATOR_TOKEN, and "
-                "TUBEKEEL_APPEALS_TOKEN must be distinct."
+                "KEELTUBE_CREATOR_TOKEN, KEELTUBE_MODERATOR_TOKEN, and "
+                "KEELTUBE_APPEALS_TOKEN must be distinct."
             ),
         )
     return {token: role for role, token in role_to_token.items()}

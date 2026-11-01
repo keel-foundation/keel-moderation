@@ -1,7 +1,7 @@
 [project]
 name = "keel-moderation"
 version = "0.1.0"
-description = "TubeKeel moderation, appeals, audit ledger, and content protection service"
+description = "KeelTube moderation, appeals, audit ledger, and content protection service"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.9"

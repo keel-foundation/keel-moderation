@@ -5,14 +5,14 @@ from pathlib import Path
 import pytest
 
 _tmp = tempfile.mkdtemp(prefix="keel-moderation-tests-")
-os.environ["TUBEKEEL_LEDGER_PATH"] = str(Path(_tmp) / "ledger.jsonl")
-os.environ["TUBEKEEL_STATE_DB"] = str(Path(_tmp) / "state.sqlite3")
-os.environ["TUBEKEEL_RATE_LIMIT"] = "0"
+os.environ["KEELTUBE_LEDGER_PATH"] = str(Path(_tmp) / "ledger.jsonl")
+os.environ["KEELTUBE_STATE_DB"] = str(Path(_tmp) / "state.sqlite3")
+os.environ["KEELTUBE_RATE_LIMIT"] = "0"
 for _name in (
-    "TUBEKEEL_DEMO_TOKEN",
-    "TUBEKEEL_CREATOR_TOKEN",
-    "TUBEKEEL_MODERATOR_TOKEN",
-    "TUBEKEEL_APPEALS_TOKEN",
+    "KEELTUBE_DEMO_TOKEN",
+    "KEELTUBE_CREATOR_TOKEN",
+    "KEELTUBE_MODERATOR_TOKEN",
+    "KEELTUBE_APPEALS_TOKEN",
 ):
     os.environ.pop(_name, None)
 

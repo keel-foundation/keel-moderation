@@ -34,14 +34,14 @@ def env_list(name: str, default: str) -> list[str]:
 
 
 app = FastAPI(
-    title="TubeKeel Moderation",
+    title="KeelTube Moderation",
     version="0.1.0",
     description="Signals, cases, appeals, audit ledger, and content protection.",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=env_list("TUBEKEEL_CORS_ORIGINS", "http://localhost:3000"),
+    allow_origins=env_list("KEELTUBE_CORS_ORIGINS", "http://localhost:3000"),
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
@@ -449,11 +449,11 @@ class DemoState:
 
 
 state = DemoState(
-    os.getenv("TUBEKEEL_LEDGER_PATH", DEFAULT_LEDGER_PATH),
-    os.getenv("TUBEKEEL_STATE_DB", DEFAULT_STATE_DB),
+    os.getenv("KEELTUBE_LEDGER_PATH", DEFAULT_LEDGER_PATH),
+    os.getenv("KEELTUBE_STATE_DB", DEFAULT_STATE_DB),
 )
 
-RATE_LIMIT = int(os.getenv("TUBEKEEL_RATE_LIMIT", "30"))
+RATE_LIMIT = int(os.getenv("KEELTUBE_RATE_LIMIT", "30"))
 RATE_WINDOW_SECONDS = 60.0
 _rate_lock = Lock()
 _rate_buckets: dict[str, Deque[float]] = defaultdict(deque)
