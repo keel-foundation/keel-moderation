@@ -1,0 +1,4 @@
+# Runtime-only pins used by the Docker image. Keep the versions aligned with requirements-dev.lock.
+fastapi==0.128.8
+pydantic==2.13.5
+uvicorn[standard]==0.39.0
