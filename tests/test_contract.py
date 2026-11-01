@@ -35,6 +35,8 @@ DECISION_POINTER = (
 STATE_POINTER = "/components/schemas/DemoState"
 LEDGER_POINTER = "/paths/~1v1~1ledger/get/responses/200/content/application~1json/schema"
 VERIFY_POINTER = "/paths/~1v1~1ledger~1verify/get/responses/200/content/application~1json/schema"
+WHOAMI_POINTER = "/paths/~1v1~1whoami/get/responses/200/content/application~1json/schema"
+APPEALS_POINTER = "/paths/~1v1~1appeals/get/responses/200/content/application~1json/schema"
 
 
 def build_registry() -> Registry:
@@ -115,6 +117,18 @@ def test_full_flow_matches_openapi_and_json_schemas(client, registry):
 
     verification = client.get("/v1/ledger/verify").json()
     validate_pointer(registry, VERIFY_POINTER, verification)
+
+
+def test_queue_and_identity_match_openapi(client, registry):
+    who = client.get("/v1/whoami").json()
+    validate_pointer(registry, WHOAMI_POINTER, who)
+    assert who == {"id": "demo:operator", "role": "operator"}
+
+    action = create_action(client)
+    appeal = create_appeal(client, action)
+    queue = client.get("/v1/appeals?status=pending").json()
+    validate_pointer(registry, APPEALS_POINTER, queue)
+    assert [item["id"] for item in queue["appeals"]] == [appeal["id"]]
 
 
 def test_unknown_fields_are_rejected(client):

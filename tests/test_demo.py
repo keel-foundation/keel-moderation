@@ -104,7 +104,10 @@ def test_closed_appeal_window_is_rejected(client):
     action = client.post("/v1/actions", json=ACTION_PAYLOAD).json()
     from app.main import state
 
-    state.action["appeal_deadline"] = "2020-01-01T00:00:00+00:00"
+    stored = state.store.get_action(action["id"])
+    assert stored is not None
+    stored["appeal_deadline"] = "2020-01-01T00:00:00+00:00"
+    state.store.save_action(stored)
 
     rejected = client.post(
         f"/v1/actions/{action['id']}/appeal",

@@ -11,13 +11,21 @@ from hashlib import sha256
 from pathlib import Path
 from threading import Lock, RLock
 from time import monotonic
-from typing import Deque, Literal
+from typing import Deque, Literal, Optional
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
+
+from .auth import (
+    Principal,
+    actor_payload,
+    current_principal,
+    require_roles,
+)
+from .storage import SqliteStore
 
 
 def env_list(name: str, default: str) -> list[str]:
@@ -45,9 +53,8 @@ DEMO_POLICY = {
     "appeal_window_days": 365,
 }
 
-DEFAULT_REVIEWER = "demo-reviewer"
-APPEALS_REVIEWER = "demo-appeals-reviewer"
 DEFAULT_LEDGER_PATH = "data/ledger.jsonl"
+DEFAULT_STATE_DB = "data/state.sqlite3"
 
 
 def now() -> str:
@@ -211,47 +218,245 @@ class AppealDecision(BaseModel):
 
 
 class DemoState:
-    def __init__(self, ledger_path: str | None = None) -> None:
+    def __init__(self, ledger_path: str | None = None, state_db: str | None = None) -> None:
         self.lock = RLock()
         self.ledger = Ledger(ledger_path)
-        self.action: dict | None = None
-        self.case: dict | None = None
-        self.appeals: list[dict] = []
+        self.store = SqliteStore(state_db or DEFAULT_STATE_DB)
 
-    def reset(self) -> None:
+    def reset(self, actor: Principal | None = None) -> None:
+        actor = actor or Principal("system", "operator")
         with self.lock:
-            self.action = None
-            self.case = None
-            self.appeals = []
-            self.ledger.append("demo.reset", {})
+            self.store.reset()
+            self.ledger.append("demo.reset", {"actor": actor_payload(actor)})
 
     def snapshot(self) -> dict:
         with self.lock:
+            action = self.store.get_action()
+            case = (
+                self.store.get_case(action["case_id"]) if action else self.store.get_case()
+            )
+            appeals = (
+                self.store.list_appeals(action_id=action["id"]) if action else []
+            )
             return {
-                "action": deepcopy(self.action),
-                "appeal": deepcopy(self.appeals[-1]) if self.appeals else None,
-                "appeals": deepcopy(self.appeals),
-                "case": deepcopy(self.case),
+                "action": deepcopy(action),
+                "appeal": deepcopy(appeals[-1]) if appeals else None,
+                "appeals": deepcopy(appeals),
+                "case": deepcopy(case),
                 "ledger": deepcopy(self.ledger.records),
                 "policy": deepcopy(DEMO_POLICY),
                 "verification": self.ledger.verify(),
             }
 
+    def create_action(self, body: ActionCreate, actor: Principal) -> dict:
+        with self.lock:
+            current = self.store.get_action()
+            if current and current["status"] == "active":
+                raise HTTPException(
+                    status_code=409,
+                    detail="An active demo action already exists. Reset the demo first.",
+                )
 
-state = DemoState(os.getenv("TUBEKEEL_LEDGER_PATH", DEFAULT_LEDGER_PATH))
+            created_at = now()
+            case_id = new_id("case")
+            action_id = new_id("act")
+            statement = {
+                "summary": body.reason,
+                "policy_version": DEMO_POLICY["policy_version"],
+                "evidence_refs": body.evidence,
+            }
+            action = {
+                "id": action_id,
+                "case_id": case_id,
+                "action_type": "label",
+                "scope": "video",
+                "policy_clause": body.policy_clause,
+                "statement_of_reasons": statement,
+                "human_reviewer": actor.id,
+                "status": "active",
+                "effective_at": created_at,
+                "appeal_deadline": (
+                    datetime.now(timezone.utc)
+                    + timedelta(days=DEMO_POLICY["appeal_window_days"])
+                ).isoformat(),
+                "audit_record_hash": "",
+                "created_at": created_at,
+            }
+            case = {
+                "id": case_id,
+                "subject": {"type": "video", "id": body.video_id},
+                "status": "decided",
+                "severity": "medium",
+                "policy_refs": [body.policy_clause],
+                "signals": [
+                    {
+                        "id": new_id("sig"),
+                        "source": "automated",
+                        "signal_type": "spam",
+                        "confidence": 0.91,
+                        "model_version": "spam-v0.1",
+                        "evidence_ref": "model:spam-v0.1",
+                        "created_at": created_at,
+                    }
+                ],
+                "evidence": [{"kind": "other", "ref": item} for item in body.evidence],
+                "assignee": actor.id,
+                "reviewer": actor.id,
+                "decision_action_id": action_id,
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+            self.store.save_case(case)
+            self.store.save_action(action)
+            self.ledger.append(
+                "moderation_case.opened",
+                {"case": case, "actor": actor_payload(actor)},
+            )
+            record = self.ledger.append(
+                "enforcement_action.created",
+                {"action": action, "actor": actor_payload(actor)},
+            )
+            action["audit_record_hash"] = record["hash"]
+            self.store.save_action(action)
+            return deepcopy(action)
+
+    def file_appeal(self, action_id: str, body: AppealCreate, actor: Principal) -> dict:
+        with self.lock:
+            action = self.store.get_action(action_id)
+            if not action:
+                raise HTTPException(status_code=404, detail="Action not found")
+            if action["status"] != "active":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Only an active action can be appealed.",
+                )
+            deadline = datetime.fromisoformat(action["appeal_deadline"])
+            if datetime.now(timezone.utc) > deadline:
+                raise HTTPException(status_code=409, detail="The appeal window has closed.")
+
+            appeals = self.store.list_appeals(action_id=action_id)
+            if appeals and appeals[-1]["status"] == "pending":
+                raise HTTPException(status_code=409, detail="An appeal is already pending.")
+            if (
+                appeals
+                and appeals[-1]["status"] == "decided"
+                and body.grounds not in {"new_evidence", "procedural_error"}
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="A second appeal requires new evidence or a procedural error.",
+                )
+
+            appeal = {
+                "id": new_id("apl"),
+                "action_id": action_id,
+                "appellant": actor.id,
+                "grounds": body.grounds,
+                "statement": body.statement,
+                "submitted_at": now(),
+                "status": "pending",
+                "reviewer": None,
+                "decision": None,
+                "reasoning": None,
+                "decided_at": None,
+            }
+            self.store.save_appeal(appeal)
+            self.ledger.append(
+                "appeal.filed",
+                {"appeal": appeal, "actor": actor_payload(actor)},
+            )
+            return deepcopy(appeal)
+
+    def decide_appeal(self, appeal_id: str, body: AppealDecision, actor: Principal) -> dict:
+        with self.lock:
+            appeal = self.store.get_appeal(appeal_id)
+            if not appeal:
+                raise HTTPException(status_code=404, detail="Appeal not found")
+            if appeal["status"] != "pending":
+                raise HTTPException(status_code=409, detail="Appeal already decided")
+            action = self.store.get_action(appeal["action_id"])
+            if not action:
+                raise HTTPException(status_code=409, detail="No action to update")
+            if actor.id == appeal["appellant"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="An appellant cannot decide their own appeal.",
+                )
+            if actor.id == action["human_reviewer"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="The original decision-maker cannot decide the appeal.",
+                )
+
+            decided_at = now()
+            appeal.update(
+                {
+                    "status": "decided",
+                    "decision": body.decision,
+                    "reasoning": body.reasoning,
+                    "reviewer": actor.id,
+                    "decided_at": decided_at,
+                }
+            )
+            self.store.save_appeal(appeal)
+            self.ledger.append(
+                "appeal.decided",
+                {"appeal": appeal, "actor": actor_payload(actor)},
+            )
+
+            if body.decision == "reverse":
+                action["status"] = "reversed"
+                record = self.ledger.append(
+                    "enforcement_action.reversed",
+                    {
+                        "action_id": action["id"],
+                        "appeal_id": appeal_id,
+                        "decision": body.decision,
+                        "reasoning": body.reasoning,
+                        "reviewer": actor.id,
+                        "decided_at": decided_at,
+                        "actor": actor_payload(actor),
+                    },
+                )
+                action["reversal_record_hash"] = record["hash"]
+                self.store.save_action(action)
+            else:
+                self.ledger.append(
+                    "enforcement_action.upheld",
+                    {
+                        "action_id": action["id"],
+                        "appeal_id": appeal_id,
+                        "decision": body.decision,
+                        "reasoning": body.reasoning,
+                        "reviewer": actor.id,
+                        "decided_at": decided_at,
+                        "actor": actor_payload(actor),
+                    },
+                )
+
+            return self.snapshot()
+
+    def list_appeals(self, status: str | None = None) -> list[dict]:
+        with self.lock:
+            return deepcopy(self.store.list_appeals(status=status))
+
+    def get_appeal(self, appeal_id: str) -> dict | None:
+        with self.lock:
+            return deepcopy(self.store.get_appeal(appeal_id))
+
+    def verify_ledger(self) -> dict:
+        return self.ledger.verify()
+
+
+state = DemoState(
+    os.getenv("TUBEKEEL_LEDGER_PATH", DEFAULT_LEDGER_PATH),
+    os.getenv("TUBEKEEL_STATE_DB", DEFAULT_STATE_DB),
+)
 
 RATE_LIMIT = int(os.getenv("TUBEKEEL_RATE_LIMIT", "30"))
 RATE_WINDOW_SECONDS = 60.0
 _rate_lock = Lock()
 _rate_buckets: dict[str, Deque[float]] = defaultdict(deque)
-
-
-def require_token(request: Request) -> None:
-    expected = os.getenv("TUBEKEEL_DEMO_TOKEN")
-    if not expected:
-        return
-    if request.headers.get("authorization") != f"Bearer {expected}":
-        raise HTTPException(status_code=401, detail="A valid demo token is required.")
 
 
 def rate_limit(request: Request) -> None:
@@ -292,186 +497,73 @@ def demo_state() -> dict:
     return state.snapshot()
 
 
-@app.post("/v1/demo/reset", dependencies=[Depends(require_token), Depends(rate_limit)])
-def demo_reset() -> dict:
-    state.reset()
+@app.post("/v1/demo/reset", dependencies=[Depends(rate_limit)])
+def demo_reset(
+    principal: Principal = Depends(require_roles("moderator")),
+) -> dict:
+    state.reset(actor=principal)
     return state.snapshot()
 
 
 @app.post(
     "/v1/actions",
     status_code=201,
-    dependencies=[Depends(require_token), Depends(rate_limit)],
+    dependencies=[Depends(rate_limit)],
 )
-def create_action(body: ActionCreate) -> dict:
-    with state.lock:
-        if state.action and state.action["status"] == "active":
-            raise HTTPException(
-                status_code=409,
-                detail="An active demo action already exists. Reset the demo first.",
-            )
-
-        created_at = now()
-        case_id = new_id("case")
-        action_id = new_id("act")
-        statement = {
-            "summary": body.reason,
-            "policy_version": DEMO_POLICY["policy_version"],
-            "evidence_refs": body.evidence,
-        }
-        action = {
-            "id": action_id,
-            "case_id": case_id,
-            "action_type": "label",
-            "scope": "video",
-            "policy_clause": body.policy_clause,
-            "statement_of_reasons": statement,
-            "human_reviewer": DEFAULT_REVIEWER,
-            "status": "active",
-            "effective_at": created_at,
-            "appeal_deadline": (
-                datetime.now(timezone.utc)
-                + timedelta(days=DEMO_POLICY["appeal_window_days"])
-            ).isoformat(),
-            "audit_record_hash": "",
-            "created_at": created_at,
-        }
-        case = {
-            "id": case_id,
-            "subject": {"type": "video", "id": body.video_id},
-            "status": "decided",
-            "severity": "medium",
-            "policy_refs": [body.policy_clause],
-            "signals": [
-                {
-                    "id": new_id("sig"),
-                    "source": "automated",
-                    "signal_type": "spam",
-                    "confidence": 0.91,
-                    "model_version": "spam-v0.1",
-                    "evidence_ref": "model:spam-v0.1",
-                    "created_at": created_at,
-                }
-            ],
-            "evidence": [{"kind": "other", "ref": item} for item in body.evidence],
-            "assignee": DEFAULT_REVIEWER,
-            "reviewer": DEFAULT_REVIEWER,
-            "decision_action_id": action_id,
-            "created_at": created_at,
-            "updated_at": created_at,
-        }
-        state.ledger.append("moderation_case.opened", case)
-        record = state.ledger.append("enforcement_action.created", action)
-        action["audit_record_hash"] = record["hash"]
-        state.action = action
-        state.case = case
-        state.appeals = []
-        return deepcopy(action)
+def create_action(
+    body: ActionCreate,
+    principal: Principal = Depends(require_roles("moderator")),
+) -> dict:
+    return state.create_action(body, principal)
 
 
 @app.post(
     "/v1/actions/{action_id}/appeal",
     status_code=201,
-    dependencies=[Depends(require_token), Depends(rate_limit)],
+    dependencies=[Depends(rate_limit)],
 )
-def file_appeal(action_id: str, body: AppealCreate) -> dict:
-    with state.lock:
-        if not state.action or state.action["id"] != action_id:
-            raise HTTPException(status_code=404, detail="Action not found")
-        if state.action["status"] != "active":
-            raise HTTPException(
-                status_code=409,
-                detail="Only an active action can be appealed.",
-            )
-        deadline = datetime.fromisoformat(state.action["appeal_deadline"])
-        if datetime.now(timezone.utc) > deadline:
-            raise HTTPException(status_code=409, detail="The appeal window has closed.")
-        if state.appeals and state.appeals[-1]["status"] == "pending":
-            raise HTTPException(status_code=409, detail="An appeal is already pending.")
-        if (
-            state.appeals
-            and state.appeals[-1]["status"] == "decided"
-            and body.grounds not in {"new_evidence", "procedural_error"}
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="A second appeal requires new evidence or a procedural error.",
-            )
-
-        appeal = {
-            "id": new_id("apl"),
-            "action_id": action_id,
-            "appellant": "creator:demo",
-            "grounds": body.grounds,
-            "statement": body.statement,
-            "submitted_at": now(),
-            "status": "pending",
-            "reviewer": None,
-            "decision": None,
-            "reasoning": None,
-            "decided_at": None,
-        }
-        state.appeals.append(appeal)
-        state.ledger.append("appeal.filed", appeal)
-        return deepcopy(appeal)
+def file_appeal(
+    action_id: str,
+    body: AppealCreate,
+    principal: Principal = Depends(require_roles("creator")),
+) -> dict:
+    return state.file_appeal(action_id, body, principal)
 
 
 @app.post(
     "/v1/appeals/{appeal_id}/decide",
-    dependencies=[Depends(require_token), Depends(rate_limit)],
+    dependencies=[Depends(rate_limit)],
 )
-def decide_appeal(appeal_id: str, body: AppealDecision) -> dict:
-    with state.lock:
-        appeal = next(
-            (item for item in state.appeals if item["id"] == appeal_id), None
-        )
-        if not appeal:
-            raise HTTPException(status_code=404, detail="Appeal not found")
-        if appeal["status"] != "pending":
-            raise HTTPException(status_code=409, detail="Appeal already decided")
-        if not state.action:
-            raise HTTPException(status_code=409, detail="No action to update")
+def decide_appeal(
+    appeal_id: str,
+    body: AppealDecision,
+    principal: Principal = Depends(require_roles("appeals")),
+) -> dict:
+    return state.decide_appeal(appeal_id, body, principal)
 
-        decided_at = now()
-        appeal.update(
-            {
-                "status": "decided",
-                "decision": body.decision,
-                "reasoning": body.reasoning,
-                "reviewer": APPEALS_REVIEWER,
-                "decided_at": decided_at,
-            }
-        )
-        state.ledger.append("appeal.decided", appeal)
 
-        if body.decision == "reverse":
-            state.action["status"] = "reversed"
-            record = state.ledger.append(
-                "enforcement_action.reversed",
-                {
-                    "action_id": state.action["id"],
-                    "appeal_id": appeal_id,
-                    "decision": body.decision,
-                    "reasoning": body.reasoning,
-                    "reviewer": APPEALS_REVIEWER,
-                    "decided_at": decided_at,
-                },
-            )
-            state.action["reversal_record_hash"] = record["hash"]
-        else:
-            state.ledger.append(
-                "enforcement_action.upheld",
-                {
-                    "action_id": state.action["id"],
-                    "appeal_id": appeal_id,
-                    "decision": body.decision,
-                    "reasoning": body.reasoning,
-                    "reviewer": APPEALS_REVIEWER,
-                    "decided_at": decided_at,
-                },
-            )
+@app.get("/v1/whoami")
+def whoami(principal: Principal = Depends(current_principal)) -> dict:
+    return {"id": principal.id, "role": principal.role}
 
-        return state.snapshot()
+
+@app.get("/v1/appeals")
+def list_appeals(
+    status: Optional[Literal["pending", "decided"]] = None,
+    principal: Principal = Depends(require_roles("appeals", "moderator")),
+) -> dict:
+    return {"appeals": state.list_appeals(status=status)}
+
+
+@app.get("/v1/appeals/{appeal_id}")
+def get_appeal(
+    appeal_id: str,
+    principal: Principal = Depends(require_roles("appeals", "moderator")),
+) -> dict:
+    appeal = state.get_appeal(appeal_id)
+    if not appeal:
+        raise HTTPException(status_code=404, detail="Appeal not found")
+    return appeal
 
 
 @app.get("/v1/ledger")

@@ -61,10 +61,12 @@ def test_persistence_reloads_and_verifies(tmp_path):
 
 
 def test_reset_preserves_the_ledger(tmp_path):
-    state = DemoState(str(tmp_path / "ledger.jsonl"))
+    state = DemoState(str(tmp_path / "ledger.jsonl"), str(tmp_path / "state.sqlite3"))
     before = len(state.ledger.records)
     state.reset()
+    snapshot = state.snapshot()
 
-    assert state.action is None
+    assert snapshot["action"] is None
+    assert snapshot["appeals"] == []
     assert len(state.ledger.records) == before + 1
     assert state.ledger.verify()["valid"] is True
