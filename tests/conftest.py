@@ -13,6 +13,7 @@ for _name in (
     "KEELTUBE_CREATOR_TOKEN",
     "KEELTUBE_MODERATOR_TOKEN",
     "KEELTUBE_APPEALS_TOKEN",
+    "KEELTUBE_CREATOR_CHANNEL_MAP",
 ):
     os.environ.pop(_name, None)
 

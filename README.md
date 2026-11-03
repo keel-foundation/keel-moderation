@@ -5,8 +5,9 @@ ledger, and transparency aggregates.
 
 **Status:** local demo with durable workflow state. Cases, actions, and appeals are stored in
 SQLite; the audit ledger remains append-only JSONL. Role-separated creator, moderator, and
-appeals-reviewer tokens are supported. There is no production authentication, real classifier,
-or transparency generator yet.
+appeals-reviewer tokens are supported. Creator-scoped case, action, appeal, summary, and ledger
+reads are implemented. There is no production authentication, real classifier, or public
+transparency generator yet.
 
 ## Endpoints
 
@@ -22,6 +23,16 @@ or transparency generator yet.
 | `POST` | `/v1/appeals/{appeal_id}/decide` | Decide an appeal |
 | `GET` | `/v1/appeals?status=pending\|decided` | List appeals for the review queue |
 | `GET` | `/v1/appeals/{appeal_id}` | Read one appeal |
+| `GET` | `/v1/creator/summary` | Creator-scoped transparency counts |
+| `GET` | `/v1/creator/cases` | Creator-scoped cases |
+| `GET` | `/v1/creator/cases/{case_id}` | Read one creator case |
+| `GET` | `/v1/creator/actions` | Creator-scoped enforcement actions |
+| `GET` | `/v1/creator/actions/{action_id}` | Read one creator action |
+| `GET` | `/v1/creator/appeals` | Creator-scoped appeals |
+| `GET` | `/v1/creator/appeals/{appeal_id}` | Read one creator appeal |
+| `GET` | `/v1/creator/ledger` | Creator-scoped audit records |
+| `GET` | `/v1/creator/ledger/verify` | Verify the complete hash chain |
+| `GET` | `/v1/creator/ledger/export?format=jsonl\|csv` | Export creator-scoped audit records |
 | `GET` | `/v1/ledger` | Ledger and verification result |
 | `GET` | `/v1/ledger/verify` | Verify the hash chain |
 | `GET` | `/v1/ledger/export?format=jsonl\|csv` | Export the ledger |
@@ -56,7 +67,17 @@ Then:
 - creating an action requires the moderator token;
 - filing an appeal requires the creator token;
 - deciding an appeal requires the appeals token;
-- listing appeals requires the moderator or appeals token.
+- listing appeals requires the moderator or appeals token;
+- creator-scoped read endpoints require the creator token.
+
+Creator channel scope is an authenticated principal claim. In the demo token authenticator, the
+claims come from `KEELTUBE_CREATOR_CHANNEL_MAP` (default `{"creator:demo":["ch_demo"]}`). Production
+OIDC or session authentication must supply the same `channel_ids` claim instead of reading this
+environment variable.
+
+Creator endpoints accept an optional `channel_id` query parameter. A single-channel principal can
+omit it; a multi-channel principal must provide it; a channel outside the principal's claim returns
+`403`.
 
 The service enforces reviewer independence:
 
@@ -67,12 +88,14 @@ The service enforces reviewer independence:
 The role tokens must be distinct. If they are not, requests fail with a configuration error.
 
 Read endpoints (`/v1/demo/state`, `/v1/ledger`, `/v1/ledger/verify`, and
-`/v1/ledger/export`) are unauthenticated in this local demo. Do not expose them to a shared or
-public network. Production must add read authorization, per-creator scoping, and redaction.
+`/v1/ledger/export`) remain unauthenticated in this local demo. Do not expose them to a shared or
+public network. The `/v1/creator/*` endpoints are authorized and channel-scoped.
 
 ## Persistence
 
 - Workflow state (cases, actions, appeals) is stored in SQLite at `KEELTUBE_STATE_DB`.
+- Cases, actions, and appeals carry a `channel_id` column for explicit creator scoping. The
+  domain objects returned by the existing demo endpoints remain unchanged.
 - The audit ledger remains append-only JSONL at `KEELTUBE_LEDGER_PATH`.
 - State survives a restart. The ledger is verified on load.
 - `POST /v1/demo/reset` clears the workflow tables but appends a `demo.reset` ledger record; it
@@ -86,8 +109,10 @@ public network. Production must add read authorization, per-creator scoping, and
 - `hash = SHA-256(canonical_json({seq, type, at, payload, prev_hash}))`.
 - The first record uses `prev_hash: "GENESIS"`.
 - Records are appended to a JSONL file and verified on load.
-- The payload records the domain object and the acting principal, for example
-  `{"action": {...}, "actor": {"id": "demo-reviewer", "role": "moderator"}}`.
+- The payload records the domain object, the acting principal, and the explicit channel scope, for
+  example `{"action": {...}, "actor": {"id": "demo-reviewer", "role": "moderator"},
+  "channel_id": "ch_demo"}`. Creator ledger reads filter on this explicit `channel_id`, never on
+  string matching against case, action, or appeal IDs.
 - The ledger can be verified and exported through the API. There is no external anchor yet.
 
 ## Configuration
@@ -98,6 +123,7 @@ public network. Production must add read authorization, per-creator scoping, and
 | `KEELTUBE_STATE_DB` | `data/state.sqlite3` | SQLite workflow state |
 | `KEELTUBE_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
 | `KEELTUBE_RATE_LIMIT` | `30` | Mutating requests per IP per minute; `0` disables |
+| `KEELTUBE_CREATOR_CHANNEL_MAP` | `{"creator:demo":["ch_demo"]}` | Demo principal-to-channel claims |
 | `KEELTUBE_DEMO_TOKEN` | unset | Legacy single-token demo mode |
 | `KEELTUBE_CREATOR_TOKEN` | unset | Creator token for role-enforced mode |
 | `KEELTUBE_MODERATOR_TOKEN` | unset | Moderator token for role-enforced mode |
@@ -128,7 +154,7 @@ is absent, the contract tests skip.
 3. Add the policy bundle loader and signed policy versioning.
 4. Add SLA timers and escalation to the review queue.
 5. Add a real signal-ingestion API and classifier adapters.
-6. Add the transparency report generator.
+6. Add the public transparency report generator.
 
 ## Licensing
 

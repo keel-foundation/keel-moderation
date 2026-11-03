@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 from dataclasses import dataclass
 from typing import Literal, cast
@@ -25,16 +26,71 @@ ROLE_PRINCIPALS = {
 }
 
 LEGACY_TOKEN_ENV = "KEELTUBE_DEMO_TOKEN"
+CREATOR_CHANNEL_MAP_ENV = "KEELTUBE_CREATOR_CHANNEL_MAP"
+DEFAULT_CREATOR_CHANNEL_MAP = {"creator:demo": ("ch_demo",)}
 
 
 @dataclass(frozen=True)
 class Principal:
     id: str
     role: Role
+    channel_ids: tuple[str, ...] = ()
 
 
 def actor_payload(principal: Principal) -> dict:
     return {"id": principal.id, "role": principal.role}
+
+
+def _valid_channel_id(value: str) -> bool:
+    return (
+        value.startswith("ch_")
+        and value.isascii()
+        and all(character.isalnum() or character == "_" for character in value)
+    )
+
+
+def _creator_channel_map() -> dict[str, tuple[str, ...]]:
+    raw = os.getenv(CREATOR_CHANNEL_MAP_ENV, "").strip()
+    if not raw:
+        return DEFAULT_CREATOR_CHANNEL_MAP
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"{CREATOR_CHANNEL_MAP_ENV} must be valid JSON.",
+        ) from error
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=500,
+            detail=f"{CREATOR_CHANNEL_MAP_ENV} must map principal IDs to channel lists.",
+        )
+    mapping: dict[str, tuple[str, ...]] = {}
+    for principal_id, channels in parsed.items():
+        if (
+            not isinstance(principal_id, str)
+            or not principal_id
+            or not isinstance(channels, list)
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail=f"{CREATOR_CHANNEL_MAP_ENV} must map principal IDs to channel lists.",
+            )
+        if not all(isinstance(channel, str) and _valid_channel_id(channel) for channel in channels):
+            raise HTTPException(
+                status_code=500,
+                detail=f"{CREATOR_CHANNEL_MAP_ENV} contains an invalid channel ID.",
+            )
+        mapping[principal_id] = tuple(dict.fromkeys(channels))
+    return mapping
+
+
+def _principal(role: str) -> Principal:
+    principal_id = ROLE_PRINCIPALS[role]
+    channel_ids = (
+        _creator_channel_map().get(principal_id, ()) if role == "creator" else ()
+    )
+    return Principal(id=principal_id, role=cast(Role, role), channel_ids=channel_ids)
 
 
 def _role_tokens() -> dict[str, str]:
@@ -82,7 +138,7 @@ def resolve_principal(
                         status_code=403,
                         detail=f"One of these roles is required: {', '.join(required_roles)}.",
                     )
-                return Principal(id=ROLE_PRINCIPALS[role], role=cast(Role, role))
+                return _principal(role)
         raise HTTPException(status_code=401, detail="A valid role token is required.")
 
     legacy = os.getenv(LEGACY_TOKEN_ENV, "").strip()
@@ -90,16 +146,14 @@ def resolve_principal(
         if not _match(token, legacy):
             raise HTTPException(status_code=401, detail="A valid demo token is required.")
         if required_roles:
-            role = required_roles[0]
-            return Principal(id=ROLE_PRINCIPALS[role], role=cast(Role, role))
-        return Principal(id=ROLE_PRINCIPALS["operator"], role="operator")
+            return _principal(required_roles[0])
+        return _principal("operator")
 
     # Open local demo mode. This is intentionally unauthenticated and must never be used on a
     # network-exposed deployment.
     if required_roles:
-        role = required_roles[0]
-        return Principal(id=ROLE_PRINCIPALS[role], role=cast(Role, role))
-    return Principal(id=ROLE_PRINCIPALS["operator"], role="operator")
+        return _principal(required_roles[0])
+    return _principal("operator")
 
 
 def require_roles(*roles: str):
@@ -109,8 +163,25 @@ def require_roles(*roles: str):
     return dependency
 
 
-def require_role(role: str):
-    return require_roles(role)
+def creator_channel(principal: Principal, requested: str | None = None) -> str:
+    if not principal.channel_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="The creator principal has no channel scope.",
+        )
+    if requested is not None:
+        if requested not in principal.channel_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="The creator principal is not authorized for that channel.",
+            )
+        return requested
+    if len(principal.channel_ids) == 1:
+        return principal.channel_ids[0]
+    raise HTTPException(
+        status_code=422,
+        detail="channel_id is required for a multi-channel creator principal.",
+    )
 
 
 def current_principal(request: Request) -> Principal:

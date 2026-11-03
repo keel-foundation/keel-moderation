@@ -14,7 +14,7 @@ from time import monotonic
 from typing import Deque, Literal, Optional
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .auth import (
     Principal,
     actor_payload,
+    creator_channel,
     current_principal,
     require_roles,
 )
@@ -95,15 +96,20 @@ class Ledger:
                 f"ledger verification failed at record {result['first_broken']}: {result['reason']}"
             )
 
-    def append(self, record_type: str, payload: dict) -> dict:
+    def append(
+        self, record_type: str, payload: dict, channel_id: str | None = None
+    ) -> dict:
         with self.lock:
             seq = len(self.records) + 1
             previous = self.records[-1]["hash"] if self.records else "GENESIS"
+            record_payload = deepcopy(payload)
+            if channel_id:
+                record_payload["channel_id"] = channel_id
             record = {
                 "seq": seq,
                 "type": record_type,
                 "at": now(),
-                "payload": deepcopy(payload),
+                "payload": record_payload,
                 "prev_hash": previous,
             }
             digest = sha256(canonical_record(record).encode("utf-8")).hexdigest()
@@ -157,22 +163,24 @@ class Ledger:
                 "reason": None,
             }
 
-    def export_jsonl(self) -> str:
+    def export_jsonl(self, records: list[dict] | None = None) -> str:
         with self.lock:
+            selected = self.records if records is None else records
             return "".join(
                 json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-                for record in self.records
+                for record in selected
             )
 
-    def export_csv(self) -> str:
+    def export_csv(self, records: list[dict] | None = None) -> str:
         with self.lock:
+            selected = self.records if records is None else records
             output = io.StringIO()
             writer = csv.DictWriter(
                 output,
                 fieldnames=["seq", "type", "at", "prev_hash", "hash", "payload"],
             )
             writer.writeheader()
-            for record in self.records:
+            for record in selected:
                 writer.writerow(
                     {
                         "seq": record["seq"],
@@ -192,6 +200,9 @@ class ActionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     video_id: str = Field(pattern=r"^vid_[a-zA-Z0-9_]+$", max_length=80)
+    channel_id: str = Field(
+        default="ch_demo", pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    )
     policy_clause: str = Field(default="spam.mass_production", min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=2000)
     evidence: list[str] = Field(min_length=1, max_length=50)
@@ -215,6 +226,11 @@ class AppealDecision(BaseModel):
 
     decision: Literal["reverse", "uphold"]
     reasoning: str = Field(min_length=1, max_length=4000)
+
+
+CaseStatus = Literal["open", "reviewing", "decided", "appealed", "closed"]
+ActionStatus = Literal["active", "reversed", "expired"]
+AppealStatus = Literal["pending", "decided"]
 
 
 class DemoState:
@@ -250,8 +266,9 @@ class DemoState:
 
     def create_action(self, body: ActionCreate, actor: Principal) -> dict:
         with self.lock:
-            current = self.store.get_action()
-            if current and current["status"] == "active":
+            channel_id = body.channel_id
+            current = self.store.get_active_action(channel_id)
+            if current:
                 raise HTTPException(
                     status_code=409,
                     detail="An active demo action already exists. Reset the demo first.",
@@ -306,18 +323,20 @@ class DemoState:
                 "created_at": created_at,
                 "updated_at": created_at,
             }
-            self.store.save_case(case)
-            self.store.save_action(action)
+            self.store.save_case(case, channel_id=channel_id)
+            self.store.save_action(action, channel_id=channel_id)
             self.ledger.append(
                 "moderation_case.opened",
                 {"case": case, "actor": actor_payload(actor)},
+                channel_id=channel_id,
             )
             record = self.ledger.append(
                 "enforcement_action.created",
                 {"action": action, "actor": actor_payload(actor)},
+                channel_id=channel_id,
             )
             action["audit_record_hash"] = record["hash"]
-            self.store.save_action(action)
+            self.store.save_action(action, channel_id=channel_id)
             return deepcopy(action)
 
     def file_appeal(self, action_id: str, body: AppealCreate, actor: Principal) -> dict:
@@ -347,6 +366,7 @@ class DemoState:
                     detail="A second appeal requires new evidence or a procedural error.",
                 )
 
+            channel_id = self.store.get_action_channel_id(action_id) or ""
             appeal = {
                 "id": new_id("apl"),
                 "action_id": action_id,
@@ -360,10 +380,11 @@ class DemoState:
                 "reasoning": None,
                 "decided_at": None,
             }
-            self.store.save_appeal(appeal)
+            self.store.save_appeal(appeal, channel_id=channel_id)
             self.ledger.append(
                 "appeal.filed",
                 {"appeal": appeal, "actor": actor_payload(actor)},
+                channel_id=channel_id,
             )
             return deepcopy(appeal)
 
@@ -377,6 +398,11 @@ class DemoState:
             action = self.store.get_action(appeal["action_id"])
             if not action:
                 raise HTTPException(status_code=409, detail="No action to update")
+            channel_id = (
+                self.store.get_appeal_channel_id(appeal_id)
+                or self.store.get_action_channel_id(action["id"])
+                or ""
+            )
             if actor.id == appeal["appellant"]:
                 raise HTTPException(
                     status_code=403,
@@ -398,10 +424,11 @@ class DemoState:
                     "decided_at": decided_at,
                 }
             )
-            self.store.save_appeal(appeal)
+            self.store.save_appeal(appeal, channel_id=channel_id)
             self.ledger.append(
                 "appeal.decided",
                 {"appeal": appeal, "actor": actor_payload(actor)},
+                channel_id=channel_id,
             )
 
             if body.decision == "reverse":
@@ -417,9 +444,10 @@ class DemoState:
                         "decided_at": decided_at,
                         "actor": actor_payload(actor),
                     },
+                    channel_id=channel_id,
                 )
                 action["reversal_record_hash"] = record["hash"]
-                self.store.save_action(action)
+                self.store.save_action(action, channel_id=channel_id)
             else:
                 self.ledger.append(
                     "enforcement_action.upheld",
@@ -432,6 +460,7 @@ class DemoState:
                         "decided_at": decided_at,
                         "actor": actor_payload(actor),
                     },
+                    channel_id=channel_id,
                 )
 
             return self.snapshot()
@@ -443,6 +472,118 @@ class DemoState:
     def get_appeal(self, appeal_id: str) -> dict | None:
         with self.lock:
             return deepcopy(self.store.get_appeal(appeal_id))
+
+    def list_creator_cases(
+        self,
+        channel_id: str,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        with self.lock:
+            cases, total = self.store.list_creator_cases(
+                channel_id, status=status, limit=limit, offset=offset
+            )
+            return {
+                "cases": deepcopy(cases),
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "channel_id": channel_id,
+            }
+
+    def get_creator_case(self, case_id: str, channel_id: str) -> dict | None:
+        with self.lock:
+            case = self.store.get_creator_case(case_id, channel_id)
+            return deepcopy(case) if case else None
+
+    def list_creator_actions(
+        self,
+        channel_id: str,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        with self.lock:
+            actions, total = self.store.list_creator_actions(
+                channel_id, status=status, limit=limit, offset=offset
+            )
+            return {
+                "actions": deepcopy(actions),
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "channel_id": channel_id,
+            }
+
+    def get_creator_action(self, action_id: str, channel_id: str) -> dict | None:
+        with self.lock:
+            action = self.store.get_creator_action(action_id, channel_id)
+            return deepcopy(action) if action else None
+
+    def list_creator_appeals(
+        self,
+        channel_id: str,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        with self.lock:
+            appeals, total = self.store.list_creator_appeals(
+                channel_id, status=status, limit=limit, offset=offset
+            )
+            return {
+                "appeals": deepcopy(appeals),
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "channel_id": channel_id,
+            }
+
+    def get_creator_appeal(self, appeal_id: str, channel_id: str) -> dict | None:
+        with self.lock:
+            appeal = self.store.get_creator_appeal(appeal_id, channel_id)
+            return deepcopy(appeal) if appeal else None
+
+    def creator_ledger(
+        self, channel_id: str, limit: int = 50, offset: int = 0
+    ) -> dict:
+        with self.lock:
+            records = [
+                deepcopy(record)
+                for record in self.ledger.records
+                if record.get("payload", {}).get("channel_id") == channel_id
+            ]
+            total = len(records)
+            return {
+                "ledger": records[offset : offset + limit],
+                "verification": self.ledger.verify(),
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "channel_id": channel_id,
+            }
+
+    def creator_ledger_export(self, channel_id: str, format: str) -> str:
+        with self.lock:
+            records = [
+                deepcopy(record)
+                for record in self.ledger.records
+                if record.get("payload", {}).get("channel_id") == channel_id
+            ]
+            if format == "csv":
+                return self.ledger.export_csv(records)
+            return self.ledger.export_jsonl(records)
+
+    def creator_summary(self, channel_id: str) -> dict:
+        with self.lock:
+            summary = self.store.creator_summary(channel_id)
+            summary["ledger_records"] = sum(
+                1
+                for record in self.ledger.records
+                if record.get("payload", {}).get("channel_id") == channel_id
+            )
+            return summary
 
     def verify_ledger(self) -> dict:
         return self.ledger.verify()
@@ -564,6 +705,152 @@ def get_appeal(
     if not appeal:
         raise HTTPException(status_code=404, detail="Appeal not found")
     return appeal
+
+
+@app.get("/v1/creator/summary")
+def creator_summary(
+    channel_id: Optional[str] = Query(
+        None, pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    ),
+    principal: Principal = Depends(require_roles("creator")),
+) -> dict:
+    return state.creator_summary(creator_channel(principal, channel_id))
+
+
+@app.get("/v1/creator/cases")
+def creator_cases(
+    status: Optional[CaseStatus] = None,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    channel_id: Optional[str] = Query(
+        None, pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    ),
+    principal: Principal = Depends(require_roles("creator")),
+) -> dict:
+    return state.list_creator_cases(
+        creator_channel(principal, channel_id), status=status, limit=limit, offset=offset
+    )
+
+
+@app.get("/v1/creator/cases/{case_id}")
+def creator_case(
+    case_id: str,
+    channel_id: Optional[str] = Query(
+        None, pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    ),
+    principal: Principal = Depends(require_roles("creator")),
+) -> dict:
+    case = state.get_creator_case(case_id, creator_channel(principal, channel_id))
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return case
+
+
+@app.get("/v1/creator/actions")
+def creator_actions(
+    status: Optional[ActionStatus] = None,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    channel_id: Optional[str] = Query(
+        None, pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    ),
+    principal: Principal = Depends(require_roles("creator")),
+) -> dict:
+    return state.list_creator_actions(
+        creator_channel(principal, channel_id), status=status, limit=limit, offset=offset
+    )
+
+
+@app.get("/v1/creator/actions/{action_id}")
+def creator_action(
+    action_id: str,
+    channel_id: Optional[str] = Query(
+        None, pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    ),
+    principal: Principal = Depends(require_roles("creator")),
+) -> dict:
+    action = state.get_creator_action(action_id, creator_channel(principal, channel_id))
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found")
+    return action
+
+
+@app.get("/v1/creator/appeals")
+def creator_appeals(
+    status: Optional[AppealStatus] = None,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    channel_id: Optional[str] = Query(
+        None, pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    ),
+    principal: Principal = Depends(require_roles("creator")),
+) -> dict:
+    return state.list_creator_appeals(
+        creator_channel(principal, channel_id), status=status, limit=limit, offset=offset
+    )
+
+
+@app.get("/v1/creator/appeals/{appeal_id}")
+def creator_appeal(
+    appeal_id: str,
+    channel_id: Optional[str] = Query(
+        None, pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    ),
+    principal: Principal = Depends(require_roles("creator")),
+) -> dict:
+    appeal = state.get_creator_appeal(appeal_id, creator_channel(principal, channel_id))
+    if not appeal:
+        raise HTTPException(status_code=404, detail="Appeal not found")
+    return appeal
+
+
+@app.get("/v1/creator/ledger")
+def creator_ledger(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    channel_id: Optional[str] = Query(
+        None, pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    ),
+    principal: Principal = Depends(require_roles("creator")),
+) -> dict:
+    return state.creator_ledger(
+        creator_channel(principal, channel_id), limit=limit, offset=offset
+    )
+
+
+@app.get("/v1/creator/ledger/verify")
+def creator_ledger_verify(
+    channel_id: Optional[str] = Query(
+        None, pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    ),
+    principal: Principal = Depends(require_roles("creator")),
+) -> dict:
+    creator_channel(principal, channel_id)
+    return state.verify_ledger()
+
+
+@app.get("/v1/creator/ledger/export")
+def creator_ledger_export(
+    format: Literal["jsonl", "csv"] = "jsonl",
+    channel_id: Optional[str] = Query(
+        None, pattern=r"^ch_[a-zA-Z0-9_]+$", max_length=80
+    ),
+    principal: Principal = Depends(require_roles("creator")),
+) -> Response:
+    content = state.creator_ledger_export(
+        creator_channel(principal, channel_id), format
+    )
+    if format == "csv":
+        media_type = "text/csv"
+        filename = "creator-ledger.csv"
+    else:
+        media_type = "application/x-ndjson"
+        filename = "creator-ledger.jsonl"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/v1/ledger")

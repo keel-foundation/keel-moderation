@@ -177,6 +177,7 @@ def test_legacy_demo_token_still_simulates_the_flow(client, monkeypatch):
 
     assert client.post("/v1/actions", json=ACTION_PAYLOAD).status_code == 401
     action = client.post("/v1/actions", json=ACTION_PAYLOAD, headers=headers).json()
+    assert client.get("/v1/creator/cases", headers=headers).status_code == 200
     appeal = client.post(
         f"/v1/actions/{action['id']}/appeal",
         json=APPEAL_PAYLOAD,

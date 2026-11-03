@@ -5,9 +5,9 @@ import sqlite3
 from pathlib import Path
 from threading import RLock
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-SCHEMA = """
+SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS meta (
 
 CREATE TABLE IF NOT EXISTS cases (
     id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL,
     subject_type TEXT NOT NULL,
     subject_id TEXT NOT NULL,
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS cases (
 
 CREATE TABLE IF NOT EXISTS actions (
     id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL DEFAULT '',
     case_id TEXT NOT NULL,
     status TEXT NOT NULL,
     data TEXT NOT NULL,
@@ -33,14 +35,25 @@ CREATE TABLE IF NOT EXISTS actions (
 
 CREATE TABLE IF NOT EXISTS appeals (
     id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL DEFAULT '',
     action_id TEXT NOT NULL,
     status TEXT NOT NULL,
     submitted_at TEXT NOT NULL,
     data TEXT NOT NULL
 );
+"""
 
+SCHEMA_INDEXES = """
+CREATE INDEX IF NOT EXISTS cases_channel_created ON cases (channel_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS cases_channel_status ON cases (channel_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS actions_channel_created
+    ON actions (channel_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS actions_channel_status ON actions (channel_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS appeals_action_id ON appeals (action_id);
 CREATE INDEX IF NOT EXISTS appeals_status ON appeals (status);
+CREATE INDEX IF NOT EXISTS appeals_channel_submitted
+    ON appeals (channel_id, submitted_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS appeals_channel_status ON appeals (channel_id, status, submitted_at ASC);
 """
 
 
@@ -66,11 +79,27 @@ class SqliteStore:
 
     def _init(self) -> None:
         with self.lock, self.connection:
-            self.connection.executescript(SCHEMA)
+            self.connection.executescript(SCHEMA_TABLES)
+            self._ensure_column("cases", "channel_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("actions", "channel_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("appeals", "channel_id", "TEXT NOT NULL DEFAULT ''")
+            self.connection.executescript(SCHEMA_INDEXES)
             self.connection.execute(
-                "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
-                "ON CONFLICT (key) DO NOTHING",
+                """
+                INSERT INTO meta (key, value) VALUES ('schema_version', ?)
+                ON CONFLICT (key) DO UPDATE SET value = excluded.value
+                """,
                 (str(SCHEMA_VERSION),),
+            )
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        columns = {
+            row["name"]
+            for row in self.connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            self.connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
             )
 
     def reset(self) -> None:
@@ -79,22 +108,27 @@ class SqliteStore:
             self.connection.execute("DELETE FROM actions")
             self.connection.execute("DELETE FROM cases")
 
-    def save_case(self, case: dict) -> None:
+    def save_case(self, case: dict, channel_id: str | None = None) -> None:
         with self.lock, self.connection:
             self.connection.execute(
                 """
                 INSERT INTO cases
-                    (id, status, subject_type, subject_id, data, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (id, channel_id, status, subject_type, subject_id, data, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (id) DO UPDATE SET
                     status = excluded.status,
                     subject_type = excluded.subject_type,
                     subject_id = excluded.subject_id,
                     data = excluded.data,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    channel_id = CASE
+                        WHEN excluded.channel_id <> '' THEN excluded.channel_id
+                        ELSE cases.channel_id
+                    END
                 """,
                 (
                     case["id"],
+                    channel_id or "",
                     case["status"],
                     case["subject"]["type"],
                     case["subject"]["id"],
@@ -115,18 +149,42 @@ class SqliteStore:
             row = self.connection.execute(query, params).fetchone()
         return json.loads(row["data"]) if row else None
 
-    def save_action(self, action: dict) -> None:
+    def get_creator_case(self, case_id: str, channel_id: str) -> dict | None:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT data FROM cases WHERE id = ? AND channel_id = ?",
+                (case_id, channel_id),
+            ).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def list_creator_cases(
+        self,
+        channel_id: str,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        return self._list_scoped(
+            "cases", "created_at DESC, id DESC", channel_id, status, limit, offset
+        )
+
+    def save_action(self, action: dict, channel_id: str | None = None) -> None:
         with self.lock, self.connection:
             self.connection.execute(
                 """
-                INSERT INTO actions (id, case_id, status, data, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO actions (id, channel_id, case_id, status, data, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (id) DO UPDATE SET
                     status = excluded.status,
-                    data = excluded.data
+                    data = excluded.data,
+                    channel_id = CASE
+                        WHEN excluded.channel_id <> '' THEN excluded.channel_id
+                        ELSE actions.channel_id
+                    END
                 """,
                 (
                     action["id"],
+                    channel_id or "",
                     action["case_id"],
                     action["status"],
                     json.dumps(action, ensure_ascii=False),
@@ -145,18 +203,55 @@ class SqliteStore:
             row = self.connection.execute(query, params).fetchone()
         return json.loads(row["data"]) if row else None
 
-    def save_appeal(self, appeal: dict) -> None:
+    def get_active_action(self, channel_id: str) -> dict | None:
+        with self.lock:
+            row = self.connection.execute(
+                """
+                SELECT data FROM actions
+                WHERE channel_id = ? AND status = 'active'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (channel_id,),
+            ).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def get_creator_action(self, action_id: str, channel_id: str) -> dict | None:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT data FROM actions WHERE id = ? AND channel_id = ?",
+                (action_id, channel_id),
+            ).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def list_creator_actions(
+        self,
+        channel_id: str,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        return self._list_scoped(
+            "actions", "created_at DESC, id DESC", channel_id, status, limit, offset
+        )
+
+    def save_appeal(self, appeal: dict, channel_id: str | None = None) -> None:
         with self.lock, self.connection:
             self.connection.execute(
                 """
-                INSERT INTO appeals (id, action_id, status, submitted_at, data)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO appeals (id, channel_id, action_id, status, submitted_at, data)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (id) DO UPDATE SET
                     status = excluded.status,
-                    data = excluded.data
+                    data = excluded.data,
+                    channel_id = CASE
+                        WHEN excluded.channel_id <> '' THEN excluded.channel_id
+                        ELSE appeals.channel_id
+                    END
                 """,
                 (
                     appeal["id"],
+                    channel_id or "",
                     appeal["action_id"],
                     appeal["status"],
                     appeal["submitted_at"],
@@ -170,6 +265,30 @@ class SqliteStore:
                 "SELECT data FROM appeals WHERE id = ?", (appeal_id,)
             ).fetchone()
         return json.loads(row["data"]) if row else None
+
+    def get_creator_appeal(self, appeal_id: str, channel_id: str) -> dict | None:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT data FROM appeals WHERE id = ? AND channel_id = ?",
+                (appeal_id, channel_id),
+            ).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def list_creator_appeals(
+        self,
+        channel_id: str,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        return self._list_scoped(
+            "appeals",
+            "submitted_at ASC, id ASC",
+            channel_id,
+            status,
+            limit,
+            offset,
+        )
 
     def list_appeals(
         self, status: str | None = None, action_id: str | None = None
@@ -189,6 +308,91 @@ class SqliteStore:
         with self.lock:
             rows = self.connection.execute(query, tuple(params)).fetchall()
         return [json.loads(row["data"]) for row in rows]
+
+    def get_action_channel_id(self, action_id: str) -> str | None:
+        return self._channel_id("actions", action_id)
+
+    def get_appeal_channel_id(self, appeal_id: str) -> str | None:
+        return self._channel_id("appeals", appeal_id)
+
+    def creator_summary(self, channel_id: str) -> dict:
+        with self.lock:
+            cases = self.connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN status IN ('open', 'reviewing', 'appealed')
+                        THEN 1 ELSE 0 END), 0) AS open
+                FROM cases WHERE channel_id = ?
+                """,
+                (channel_id,),
+            ).fetchone()
+            actions = self.connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active
+                FROM actions WHERE channel_id = ?
+                """,
+                (channel_id,),
+            ).fetchone()
+            appeals = self.connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+                    COALESCE(SUM(CASE WHEN status = 'decided' THEN 1 ELSE 0 END), 0) AS decided
+                FROM appeals WHERE channel_id = ?
+                """,
+                (channel_id,),
+            ).fetchone()
+        return {
+            "channel_id": channel_id,
+            "cases_total": cases["total"],
+            "open_cases": cases["open"],
+            "actions_total": actions["total"],
+            "active_actions": actions["active"],
+            "appeals_total": appeals["total"],
+            "pending_appeals": appeals["pending"],
+            "decided_appeals": appeals["decided"],
+        }
+
+    def _channel_id(self, table: str, item_id: str) -> str | None:
+        with self.lock:
+            row = self.connection.execute(
+                f"SELECT channel_id FROM {table} WHERE id = ?", (item_id,)
+            ).fetchone()
+        return row["channel_id"] if row else None
+
+    def _list_scoped(
+        self,
+        table: str,
+        order: str,
+        channel_id: str,
+        status: str | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict], int]:
+        clauses = ["channel_id = ?"]
+        params: list[str | int] = [channel_id]
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = " AND ".join(clauses)
+        with self.lock:
+            total_row = self.connection.execute(
+                f"SELECT COUNT(*) AS total FROM {table} WHERE {where}", tuple(params)
+            ).fetchone()
+            rows = self.connection.execute(
+                f"""
+                SELECT data FROM {table}
+                WHERE {where}
+                ORDER BY {order}
+                LIMIT ? OFFSET ?
+                """,
+                tuple([*params, limit, offset]),
+            ).fetchall()
+        return [json.loads(row["data"]) for row in rows], total_row["total"]
 
     def close(self) -> None:
         with self.lock:
