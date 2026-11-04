@@ -7,6 +7,24 @@ from threading import RLock
 
 SCHEMA_VERSION = 2
 
+POSTGRES_PREFIXES = ("postgres://", "postgresql://")
+
+
+def create_store(location: str | Path):
+    """Open the configured workflow store.
+
+    PostgreSQL DSNs use the migration-backed store. Everything else keeps the
+    SQLite path used by local tests and offline demos.
+    """
+
+    value = str(location)
+    if value.startswith(POSTGRES_PREFIXES):
+        from .postgres_store import PostgresStore
+
+        return PostgresStore(value)
+    return SqliteStore(value)
+
+
 SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -94,13 +112,10 @@ class SqliteStore:
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         columns = {
-            row["name"]
-            for row in self.connection.execute(f"PRAGMA table_info({table})").fetchall()
+            row["name"] for row in self.connection.execute(f"PRAGMA table_info({table})").fetchall()
         }
         if column not in columns:
-            self.connection.execute(
-                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-            )
+            self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def reset(self) -> None:
         with self.lock, self.connection:
@@ -157,15 +172,70 @@ class SqliteStore:
             ).fetchone()
         return json.loads(row["data"]) if row else None
 
+    def get_case_channel_id(self, case_id: str) -> str | None:
+        return self._channel_id("cases", case_id)
+
+    def list_cases(
+        self,
+        status: str | None = None,
+        channel_id: str | None = None,
+        video_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        clauses: list[str] = []
+        params: list[str | int] = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if channel_id is not None:
+            clauses.append("channel_id = ?")
+            params.append(channel_id)
+        if video_id is not None:
+            clauses.extend(["subject_type = 'video'", "subject_id = ?"])
+            params.append(video_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.lock:
+            total_row = self.connection.execute(
+                f"SELECT COUNT(*) AS total FROM cases{where}", tuple(params)
+            ).fetchone()
+            rows = self.connection.execute(
+                f"""
+                SELECT data, channel_id FROM cases{where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                tuple([*params, limit, offset]),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = json.loads(row["data"])
+            item["channel_id"] = row["channel_id"]
+            items.append(item)
+        return items, total_row["total"]
+
     def list_creator_cases(
         self,
         channel_id: str,
         status: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        video_id: str | None = None,
     ) -> tuple[list[dict], int]:
+        extra_clauses: list[str] = []
+        extra_args: list[str | int] = []
+        if video_id is not None:
+            extra_clauses.extend(["subject_type = 'video'", "subject_id = ?"])
+            extra_args.append(video_id)
         return self._list_scoped(
-            "cases", "created_at DESC, id DESC", channel_id, status, limit, offset
+            "cases",
+            "created_at DESC, id DESC",
+            channel_id,
+            status,
+            limit,
+            offset,
+            extra_clauses,
+            extra_args,
         )
 
     def save_action(self, action: dict, channel_id: str | None = None) -> None:
@@ -224,16 +294,91 @@ class SqliteStore:
             ).fetchone()
         return json.loads(row["data"]) if row else None
 
+    def list_actions(
+        self,
+        status: str | None = None,
+        channel_id: str | None = None,
+        video_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        clauses: list[str] = []
+        params: list[str | int] = []
+        if status is not None:
+            clauses.append("a.status = ?")
+            params.append(status)
+        if channel_id is not None:
+            clauses.append("a.channel_id = ?")
+            params.append(channel_id)
+        join = ""
+        if video_id is not None:
+            join = " JOIN cases c ON c.id = a.case_id"
+            clauses.extend(["c.subject_type = 'video'", "c.subject_id = ?"])
+            params.append(video_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.lock:
+            total_row = self.connection.execute(
+                f"SELECT COUNT(*) AS total FROM actions a{join}{where}", tuple(params)
+            ).fetchone()
+            rows = self.connection.execute(
+                f"""
+                SELECT a.data, a.channel_id FROM actions a{join}{where}
+                ORDER BY a.created_at DESC, a.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                tuple([*params, limit, offset]),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = json.loads(row["data"])
+            item["channel_id"] = row["channel_id"]
+            items.append(item)
+        return items, total_row["total"]
+
     def list_creator_actions(
         self,
         channel_id: str,
         status: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        video_id: str | None = None,
     ) -> tuple[list[dict], int]:
-        return self._list_scoped(
-            "actions", "created_at DESC, id DESC", channel_id, status, limit, offset
-        )
+        if video_id is None:
+            return self._list_scoped(
+                "actions", "created_at DESC, id DESC", channel_id, status, limit, offset
+            )
+
+        clauses = [
+            "a.channel_id = ?",
+            "c.channel_id = ?",
+            "c.subject_type = 'video'",
+            "c.subject_id = ?",
+        ]
+        params: list[str | int] = [channel_id, channel_id, video_id]
+        if status is not None:
+            clauses.append("a.status = ?")
+            params.append(status)
+        where = " AND ".join(clauses)
+        with self.lock:
+            total_row = self.connection.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM actions a JOIN cases c ON c.id = a.case_id
+                WHERE {where}
+                """,
+                tuple(params),
+            ).fetchone()
+            rows = self.connection.execute(
+                f"""
+                SELECT a.data
+                FROM actions a JOIN cases c ON c.id = a.case_id
+                WHERE {where}
+                ORDER BY a.created_at DESC, a.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                tuple([*params, limit, offset]),
+            ).fetchall()
+        return [json.loads(row["data"]) for row in rows], total_row["total"]
 
     def save_appeal(self, appeal: dict, channel_id: str | None = None) -> None:
         with self.lock, self.connection:
@@ -290,9 +435,7 @@ class SqliteStore:
             offset,
         )
 
-    def list_appeals(
-        self, status: str | None = None, action_id: str | None = None
-    ) -> list[dict]:
+    def list_appeals(self, status: str | None = None, action_id: str | None = None) -> list[dict]:
         clauses: list[str] = []
         params: list[str] = []
         if status is not None:
@@ -357,6 +500,41 @@ class SqliteStore:
             "decided_appeals": appeals["decided"],
         }
 
+    def staff_summary(self) -> dict:
+        with self.lock:
+            cases = self.connection.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       COALESCE(SUM(CASE WHEN status IN ('open', 'reviewing', 'appealed')
+                           THEN 1 ELSE 0 END), 0) AS open
+                FROM cases
+                """
+            ).fetchone()
+            actions = self.connection.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active
+                FROM actions
+                """
+            ).fetchone()
+            appeals = self.connection.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+                       COALESCE(SUM(CASE WHEN status = 'decided' THEN 1 ELSE 0 END), 0) AS decided
+                FROM appeals
+                """
+            ).fetchone()
+        return {
+            "cases_total": cases["total"],
+            "open_cases": cases["open"],
+            "actions_total": actions["total"],
+            "active_actions": actions["active"],
+            "appeals_total": appeals["total"],
+            "pending_appeals": appeals["pending"],
+            "decided_appeals": appeals["decided"],
+        }
+
     def _channel_id(self, table: str, item_id: str) -> str | None:
         with self.lock:
             row = self.connection.execute(
@@ -372,12 +550,18 @@ class SqliteStore:
         status: str | None,
         limit: int,
         offset: int,
+        extra_clauses: list[str] | None = None,
+        extra_args: list[str | int] | None = None,
     ) -> tuple[list[dict], int]:
         clauses = ["channel_id = ?"]
         params: list[str | int] = [channel_id]
         if status is not None:
             clauses.append("status = ?")
             params.append(status)
+        if extra_clauses:
+            clauses.extend(extra_clauses)
+        if extra_args:
+            params.extend(extra_args)
         where = " AND ".join(clauses)
         with self.lock:
             total_row = self.connection.execute(
@@ -397,3 +581,39 @@ class SqliteStore:
     def close(self) -> None:
         with self.lock:
             self.connection.close()
+
+    def public_video_record(self, video_id: str) -> dict:
+        with self.lock:
+            cases = self.connection.execute(
+                """
+                SELECT data FROM cases
+                WHERE subject_type = 'video' AND subject_id = ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (video_id,),
+            ).fetchall()
+            actions = self.connection.execute(
+                """
+                SELECT a.data FROM actions a
+                JOIN cases c ON c.id = a.case_id
+                WHERE c.subject_type = 'video' AND c.subject_id = ?
+                ORDER BY a.created_at DESC, a.id DESC
+                """,
+                (video_id,),
+            ).fetchall()
+            appeals = self.connection.execute(
+                """
+                SELECT ap.data FROM appeals ap
+                JOIN actions a ON a.id = ap.action_id
+                JOIN cases c ON c.id = a.case_id
+                WHERE c.subject_type = 'video' AND c.subject_id = ?
+                ORDER BY ap.submitted_at DESC, ap.id DESC
+                """,
+                (video_id,),
+            ).fetchall()
+        return {
+            "video_id": video_id,
+            "cases": [json.loads(row["data"]) for row in cases],
+            "actions": [json.loads(row["data"]) for row in actions],
+            "appeals": [json.loads(row["data"]) for row in appeals],
+        }

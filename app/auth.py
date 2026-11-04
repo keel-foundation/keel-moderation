@@ -68,9 +68,7 @@ def _principal(role: str) -> Principal:
 
 
 def _role_tokens() -> dict[str, str]:
-    configured = {
-        role: os.getenv(env_name, "").strip() for role, env_name in ROLE_ENV.items()
-    }
+    configured = {role: os.getenv(env_name, "").strip() for role, env_name in ROLE_ENV.items()}
     present = {role: token for role, token in configured.items() if token}
     if not present:
         return {}
@@ -121,8 +119,7 @@ def resolve_principal(request: Request, required_roles: tuple[str, ...] | None =
         raise HTTPException(
             status_code=503,
             detail=(
-                "Moderation authentication is not configured. Set OIDC or all three "
-                "role tokens."
+                "Moderation authentication is not configured. Set OIDC or all three role tokens."
             ),
         )
 

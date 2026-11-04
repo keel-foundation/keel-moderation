@@ -29,12 +29,10 @@ APPEALS = {"Authorization": "Bearer appeals-token"}
 
 ACTION_POINTER = "/paths/~1v1~1actions/post/responses/201/content/application~1json/schema"
 APPEAL_POINTER = (
-    "/paths/~1v1~1actions~1{action_id}~1appeal/post/responses/201/"
-    "content/application~1json/schema"
+    "/paths/~1v1~1actions~1{action_id}~1appeal/post/responses/201/content/application~1json/schema"
 )
 DECISION_POINTER = (
-    "/paths/~1v1~1appeals~1{appeal_id}~1decide/post/responses/200/"
-    "content/application~1json/schema"
+    "/paths/~1v1~1appeals~1{appeal_id}~1decide/post/responses/200/content/application~1json/schema"
 )
 STATE_POINTER = "/components/schemas/DemoState"
 LEDGER_POINTER = "/paths/~1v1~1ledger/get/responses/200/content/application~1json/schema"
@@ -176,9 +174,7 @@ def test_unknown_fields_are_rejected(client):
     ],
 )
 def test_action_declared_bounds_are_enforced(client, field, value):
-    response = client.post(
-        "/v1/actions", json={**ACTION_PAYLOAD, field: value}, headers=MODERATOR
-    )
+    response = client.post("/v1/actions", json={**ACTION_PAYLOAD, field: value}, headers=MODERATOR)
     assert response.status_code == 422
 
 
@@ -216,3 +212,58 @@ def test_openapi_documents_validation_and_rate_limit_responses():
         assert "429" in responses, f"{path} is missing a 429 response"
     for path in ("/v1/actions", "/v1/actions/{action_id}/appeal", "/v1/appeals/{appeal_id}/decide"):
         assert "422" in openapi["paths"][path]["post"]["responses"]
+
+
+def test_creator_endpoints_match_openapi(client, registry):
+    action = create_action(client)
+    appeal = create_appeal(client, action)
+
+    summary = client.get("/v1/creator/summary", headers=CREATOR).json()
+    validate_pointer(registry, "/components/schemas/CreatorSummary", summary)
+
+    cases = client.get("/v1/creator/cases", headers=CREATOR).json()
+    validate_pointer(registry, "/components/schemas/CreatorCaseList", cases)
+    validate_schema(registry, "moderation-case.schema.json", cases["cases"][0])
+
+    actions = client.get("/v1/creator/actions", headers=CREATOR).json()
+    validate_pointer(registry, "/components/schemas/CreatorActionList", actions)
+    validate_schema(registry, "enforcement-action.schema.json", actions["actions"][0])
+
+    appeals = client.get("/v1/creator/appeals", headers=CREATOR).json()
+    validate_pointer(registry, "/components/schemas/CreatorAppealList", appeals)
+    validate_schema(registry, "appeal.schema.json", appeals["appeals"][0])
+
+    ledger = client.get("/v1/creator/ledger?limit=100", headers=CREATOR).json()
+    validate_pointer(registry, "/components/schemas/CreatorLedger", ledger)
+    for record in ledger["ledger"]:
+        validate_schema(registry, "audit-record.schema.json", record)
+
+    assert cases["cases"][0]["decision_action_id"] == action["id"]
+    assert appeals["appeals"][0]["id"] == appeal["id"]
+
+
+def test_signal_ingest_matches_openapi_and_json_schemas(client, registry):
+    response = client.post(
+        "/v1/signals",
+        json={
+            "subject_type": "video",
+            "subject_id": "vid_demo_001",
+            "channel_id": "ch_demo",
+            "reason": "harassment",
+            "details": "A viewer report describes targeted harassment.",
+        },
+        headers={"Authorization": "Bearer ingest-token"},
+    )
+    assert response.status_code == 201
+    validate_schema(registry, "moderation-case.schema.json", response.json()["case"])
+    validate_schema(registry, "signal.schema.json", response.json()["signal"])
+
+
+def test_public_video_record_matches_openapi(client, registry):
+    create_action(client)
+    response = client.get("/v1/public/videos/vid_demo_001/record")
+    assert response.status_code == 200
+    payload = response.json()
+    validate_pointer(registry, "/components/schemas/PublicVideoRecord", payload)
+    validate_schema(registry, "moderation-case.schema.json", payload["cases"][0])
+    validate_schema(registry, "enforcement-action.schema.json", payload["actions"][0])

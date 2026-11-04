@@ -4,7 +4,8 @@ The moderation and content-protection service: signals, cases, human review, app
 ledger, and transparency aggregates.
 
 **Status:** local demo with durable workflow state. Cases, actions, and appeals are stored in
-SQLite; the audit ledger remains append-only JSONL. OIDC claim verification and role-separated
+PostgreSQL with versioned migrations; SQLite remains available as an explicit offline/test
+fallback. The audit ledger remains append-only JSONL. OIDC claim verification and role-separated
 creator, moderator, and appeals-reviewer tokens are supported. Creator-scoped case, action, appeal,
 summary, and ledger reads are implemented. There is no real classifier or public transparency
 generator yet.
@@ -18,9 +19,18 @@ generator yet.
 | `GET` | `/v1/demo/state` | Current action, appeal, case, ledger, verification |
 | `POST` | `/v1/demo/reset` | Clear workflow state and append a reset record |
 | `GET` | `/v1/whoami` | Resolve the current principal and role |
+| `POST` | `/v1/signals` | Ingest a viewer report as a signal and open case (service token) |
+| `GET` | `/v1/public/videos/{video_id}/record` | Public creator-safe case/action/appeal record |
 | `POST` | `/v1/actions` | Create a demo enforcement action |
 | `POST` | `/v1/actions/{action_id}/appeal` | File an appeal |
 | `POST` | `/v1/appeals/{appeal_id}/decide` | Decide an appeal |
+| `GET` | `/v1/summary` | Staff queue counts and ledger status |
+| `GET` | `/v1/cases` | List cases for staff review (`status`, `channel_id`, `video_id`, paging) |
+| `GET` | `/v1/cases/{case_id}` | Read one case with channel scope |
+| `POST` | `/v1/cases/{case_id}/actions` | Record enforcement for an existing case |
+| `POST` | `/v1/cases/{case_id}/dismiss` | Close a case without enforcement |
+| `GET` | `/v1/actions` | List enforcement actions (`status`, `channel_id`, `video_id`, paging) |
+| `GET` | `/v1/actions/{action_id}` | Read one enforcement action |
 | `GET` | `/v1/appeals?status=pending\|decided` | List appeals for the review queue |
 | `GET` | `/v1/appeals/{appeal_id}` | Read one appeal |
 | `GET` | `/v1/creator/summary` | Creator-scoped transparency counts |
@@ -92,9 +102,10 @@ Creator channel scope is an authenticated principal claim. In OIDC mode it comes
 `channel_ids` claim. In role-token mode, it comes from `KEELTUBE_CREATOR_CHANNEL_MAP` (default
 `{"creator:demo":["ch_demo"]}`). Production must use OIDC claims.
 
-Creator endpoints accept an optional `channel_id` query parameter. A single-channel principal can
-omit it; a multi-channel principal must provide it; a channel outside the principal's claim returns
-`403`.
+Creator read endpoints accept an optional `channel_id` query parameter. A single-channel principal
+can omit it; a multi-channel principal must provide it; a channel outside the principal's claim
+returns `403`. Appeal filing is also channel-scoped: a creator cannot appeal an action that belongs
+to another channel. Creator cases and actions accept an optional `video_id` filter.
 
 The service enforces reviewer independence:
 
@@ -109,17 +120,28 @@ Read endpoints (`/v1/demo/state`, `/v1/ledger`, `/v1/ledger/verify`, and
 `/v1/ledger/export`) remain unauthenticated in this local demo. Do not expose them to a shared or
 public network. The `/v1/creator/*` endpoints are authorized and channel-scoped.
 
+## Staff moderation portal
+
+The private `keel-moderation-web` repository is the staff portal. Its Node BFF holds the moderator
+and appeals role tokens server-side and calls the staff endpoints above. Moderator sessions can list
+cases and actions, record enforcement on a case, and dismiss a case. Appeals sessions can inspect the
+record and decide pending appeals. The portal never exposes a moderation token to the browser.
+
 ## Persistence
 
-- Workflow state (cases, actions, appeals) is stored in SQLite at `KEELTUBE_STATE_DB`.
+- Workflow state (cases, actions, appeals) is stored in PostgreSQL when
+  `KEELTUBE_MODERATION_DATABASE_URL` or `KEELTUBE_DATABASE_URL` is set. Migrations live in
+  `app/migrations` and are applied once on startup under `moderation_schema_migrations`.
+- Set `KEELTUBE_STATE_DB` to a SQLite path only for offline development or tests. A PostgreSQL DSN
+  in `KEELTUBE_STATE_DB` is also accepted; explicit database URL variables take precedence.
+- Workflow tables are prefixed (`moderation_cases`, `moderation_actions`, `moderation_appeals`) so
+  the service can share the devstack database with core without collisions.
 - Cases, actions, and appeals carry a `channel_id` column for explicit creator scoping. The
   domain objects returned by the existing demo endpoints remain unchanged.
 - The audit ledger remains append-only JSONL at `KEELTUBE_LEDGER_PATH`.
 - State survives a restart. The ledger is verified on load.
 - `POST /v1/demo/reset` clears the workflow tables but appends a `demo.reset` ledger record; it
   never truncates the ledger.
-- The schema is created on startup. This is a pre-alpha store; PostgreSQL plus migrations is the
-  next persistence step.
 
 ## Ledger properties
 
@@ -138,7 +160,9 @@ public network. The `/v1/creator/*` endpoints are authorized and channel-scoped.
 | Variable | Default | Purpose |
 |---|---|---|
 | `KEELTUBE_LEDGER_PATH` | `data/ledger.jsonl` | Append-only ledger file |
-| `KEELTUBE_STATE_DB` | `data/state.sqlite3` | SQLite workflow state |
+| `KEELTUBE_MODERATION_DATABASE_URL` | unset | PostgreSQL workflow state; preferred |
+| `KEELTUBE_DATABASE_URL` | unset | PostgreSQL fallback when the moderation-specific URL is unset |
+| `KEELTUBE_STATE_DB` | `data/state.sqlite3` | SQLite workflow state when PostgreSQL is unset |
 | `KEELTUBE_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
 | `KEELTUBE_RATE_LIMIT` | `30` | Mutating requests per IP per minute; `0` disables |
 | `KEELTUBE_OIDC_ISSUER` | unset | Enables OIDC mode |
@@ -152,6 +176,12 @@ public network. The `/v1/creator/*` endpoints are authorized and channel-scoped.
 | `KEELTUBE_OIDC_LEEWAY_SECONDS` | `60` | Clock skew allowance |
 | `KEELTUBE_OIDC_JWKS_CACHE_SECONDS` | `300` | JWKS/discovery cache lifetime |
 | `KEELTUBE_CREATOR_CHANNEL_MAP` | `{"creator:demo":["ch_demo"]}` | Role-token channel claims |
+| `KEELTUBE_SIGNAL_INGEST_TOKEN` | unset | Service token for `POST /v1/signals`; unset disables the route |
+| `KEELTUBE_CORE_URL` | unset | Core base URL for creator notification delivery |
+| `KEELTUBE_CORE_INTERNAL_TOKEN` | unset | Core internal notification token |
+| `KEELTUBE_CLASSIFIER_URL` | unset | Optional external classifier endpoint |
+| `KEELTUBE_CLASSIFIER_TOKEN` | unset | Optional classifier bearer token |
+| `KEELTUBE_CLASSIFIER_TIMEOUT_SECONDS` | `5` | Classifier request timeout |
 | `KEELTUBE_CREATOR_TOKEN` | unset | Creator token for role-enforced mode |
 | `KEELTUBE_MODERATOR_TOKEN` | unset | Moderator token for role-enforced mode |
 | `KEELTUBE_APPEALS_TOKEN` | unset | Appeals reviewer token for role-enforced mode |
@@ -167,6 +197,18 @@ python3 -m venv .venv
 .venv/bin/ruff check app tests
 ```
 
+Moderation sends best-effort creator notifications to core on new signals, enforcement actions, and
+appeal decisions when `KEELTUBE_CORE_URL` and `KEELTUBE_CORE_INTERNAL_TOKEN` are configured. Signals
+use the external classifier when `KEELTUBE_CLASSIFIER_URL` is set; otherwise the deterministic
+keyword classifier fills signal type, confidence, and model version.
+
+The devstack runs `python -m app.seed` before moderation starts. The seed is idempotent and creates
+a deterministic case/action/appeal/ledger record for `ch_demo`; run it manually with:
+
+```sh
+.venv/bin/python -m app.seed
+```
+
 `requirements-dev.lock` pins the full development dependency set. Regenerate it after changing
 `pyproject.toml`.
 
@@ -176,12 +218,11 @@ is absent, the contract tests skip.
 
 ## Next
 
-1. Replace SQLite workflow state with PostgreSQL and real migrations.
-2. Move the ledger to PostgreSQL with a signed periodic external anchor.
-3. Add the policy bundle loader and signed policy versioning.
-4. Add SLA timers and escalation to the review queue.
-5. Add a real signal-ingestion API and classifier adapters.
-6. Add the public transparency report generator.
+1. Move the ledger to PostgreSQL with a signed periodic external anchor.
+2. Add the policy bundle loader and signed policy versioning.
+3. Add SLA timers and escalation to the review queue.
+4. Add production classifier models and richer signal correlation.
+5. Add the public transparency report generator.
 
 ## Licensing
 

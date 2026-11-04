@@ -49,9 +49,7 @@ def file_and_reverse(client, action: dict) -> dict:
 
 
 def test_creator_reads_are_explicitly_channel_scoped(client, monkeypatch):
-    monkeypatch.setenv(
-        "KEELTUBE_CREATOR_CHANNEL_MAP", '{"creator:demo":["ch_scope_reads"]}'
-    )
+    monkeypatch.setenv("KEELTUBE_CREATOR_CHANNEL_MAP", '{"creator:demo":["ch_scope_reads"]}')
     demo_action = create_action(client, "ch_scope_reads", "vid_ch_other_001")
     demo_appeal = file_and_reverse(client, demo_action)
     other_action = create_action(client, "ch_other", "vid_demo_002")
@@ -60,7 +58,14 @@ def test_creator_reads_are_explicitly_channel_scoped(client, monkeypatch):
         json=APPEAL_PAYLOAD,
         headers=CREATOR,
     )
-    assert other_appeal.status_code == 201
+    assert other_appeal.status_code == 404
+
+    wrong_channel = client.post(
+        f"/v1/actions/{demo_action['id']}/appeal?channel_id=ch_other",
+        json=APPEAL_PAYLOAD,
+        headers=CREATOR,
+    )
+    assert wrong_channel.status_code == 403
 
     cases = client.get("/v1/creator/cases", headers=CREATOR).json()
     assert cases["channel_id"] == "ch_scope_reads"
@@ -76,27 +81,15 @@ def test_creator_reads_are_explicitly_channel_scoped(client, monkeypatch):
     assert [item["id"] for item in appeals["appeals"]] == [demo_appeal["id"]]
 
     assert (
-        client.get(
-            f"/v1/creator/cases/{other_action['case_id']}", headers=CREATOR
-        ).status_code
+        client.get(f"/v1/creator/cases/{other_action['case_id']}", headers=CREATOR).status_code
         == 404
     )
     assert (
-        client.get(
-            f"/v1/creator/actions/{other_action['id']}", headers=CREATOR
-        ).status_code
-        == 404
+        client.get(f"/v1/creator/actions/{other_action['id']}", headers=CREATOR).status_code == 404
     )
+    assert "id" not in other_appeal.json()
     assert (
-        client.get(
-            f"/v1/creator/appeals/{other_appeal.json()['id']}", headers=CREATOR
-        ).status_code
-        == 404
-    )
-    assert (
-        client.get(
-            f"/v1/creator/appeals/{demo_appeal['id']}", headers=CREATOR
-        ).json()["id"]
+        client.get(f"/v1/creator/appeals/{demo_appeal['id']}", headers=CREATOR).json()["id"]
         == demo_appeal["id"]
     )
 
@@ -115,9 +108,7 @@ def test_creator_reads_are_explicitly_channel_scoped(client, monkeypatch):
 
 
 def test_creator_ledger_uses_payload_scope_not_string_matching(client, monkeypatch):
-    monkeypatch.setenv(
-        "KEELTUBE_CREATOR_CHANNEL_MAP", '{"creator:demo":["ch_scope_ledger"]}'
-    )
+    monkeypatch.setenv("KEELTUBE_CREATOR_CHANNEL_MAP", '{"creator:demo":["ch_scope_ledger"]}')
     demo_action = create_action(client, "ch_scope_ledger", "vid_ch_other_001")
     file_and_reverse(client, demo_action)
     other_action = create_action(client, "ch_other", "vid_demo_002")
@@ -147,9 +138,7 @@ def test_creator_ledger_uses_payload_scope_not_string_matching(client, monkeypat
 
 
 def test_creator_status_filters_and_pagination(client, monkeypatch):
-    monkeypatch.setenv(
-        "KEELTUBE_CREATOR_CHANNEL_MAP", '{"creator:demo":["ch_scope_pages"]}'
-    )
+    monkeypatch.setenv("KEELTUBE_CREATOR_CHANNEL_MAP", '{"creator:demo":["ch_scope_pages"]}')
     first = create_action(client, "ch_scope_pages")
     file_and_reverse(client, first)
     second = create_action(client, "ch_scope_pages", "vid_demo_003")
@@ -170,9 +159,7 @@ def test_creator_status_filters_and_pagination(client, monkeypatch):
 
 
 def test_creator_channel_can_be_configured(client, monkeypatch):
-    monkeypatch.setenv(
-        "KEELTUBE_CREATOR_CHANNEL_MAP", '{"creator:demo":["ch_other"]}'
-    )
+    monkeypatch.setenv("KEELTUBE_CREATOR_CHANNEL_MAP", '{"creator:demo":["ch_other"]}')
     action = create_action(client, "ch_other")
 
     cases = client.get("/v1/creator/cases", headers=CREATOR).json()
