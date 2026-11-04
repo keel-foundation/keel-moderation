@@ -3,12 +3,16 @@
 The moderation and content-protection service: signals, cases, human review, appeals, audit
 ledger, and transparency aggregates.
 
-**Status:** local demo with durable workflow state. Cases, actions, and appeals are stored in
+**Status:** UAT-ready with durable workflow state. Cases, actions, and appeals are stored in
 PostgreSQL with versioned migrations; SQLite remains available as an explicit offline/test
 fallback. The audit ledger remains append-only JSONL. OIDC claim verification and role-separated
 creator, moderator, and appeals-reviewer tokens are supported. Creator-scoped case, action, appeal,
-summary, and ledger reads are implemented. There is no real classifier or public transparency
-generator yet.
+summary, and ledger reads, staff review endpoints, signal ingestion, creator notifications, and the
+contract tests are implemented. `keel-moderation-web` is the staff portal that consumes the staff
+endpoints. There is no real classifier or public transparency generator yet.
+
+`pytest` and `ruff check app tests` pass. Set `KEELTUBE_TEST_DATABASE_URL` to also run the
+PostgreSQL persistence test; it skips when no test database is configured.
 
 ## Endpoints
 
