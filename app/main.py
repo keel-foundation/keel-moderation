@@ -19,13 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from .auth import (
-    Principal,
-    actor_payload,
-    creator_channel,
-    current_principal,
-    require_roles,
-)
+from .auth import creator_channel, current_principal, require_roles
+from .principals import Principal, actor_payload
 from .storage import SqliteStore
 
 

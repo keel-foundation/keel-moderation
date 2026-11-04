@@ -3,12 +3,12 @@ from __future__ import annotations
 import hmac
 import json
 import os
-from dataclasses import dataclass
-from typing import Literal, cast
+from typing import cast
 
 from fastapi import HTTPException, Request
 
-Role = Literal["creator", "moderator", "appeals", "operator"]
+from .oidc import OIDCConfig, verify_oidc_token
+from .principals import Principal, Role, valid_channel_id
 
 ROLE_ENV = {
     "creator": "KEELTUBE_CREATOR_TOKEN",
@@ -25,28 +25,8 @@ ROLE_PRINCIPALS = {
     "operator": "demo:operator",
 }
 
-LEGACY_TOKEN_ENV = "KEELTUBE_DEMO_TOKEN"
 CREATOR_CHANNEL_MAP_ENV = "KEELTUBE_CREATOR_CHANNEL_MAP"
 DEFAULT_CREATOR_CHANNEL_MAP = {"creator:demo": ("ch_demo",)}
-
-
-@dataclass(frozen=True)
-class Principal:
-    id: str
-    role: Role
-    channel_ids: tuple[str, ...] = ()
-
-
-def actor_payload(principal: Principal) -> dict:
-    return {"id": principal.id, "role": principal.role}
-
-
-def _valid_channel_id(value: str) -> bool:
-    return (
-        value.startswith("ch_")
-        and value.isascii()
-        and all(character.isalnum() or character == "_" for character in value)
-    )
 
 
 def _creator_channel_map() -> dict[str, tuple[str, ...]]:
@@ -67,16 +47,12 @@ def _creator_channel_map() -> dict[str, tuple[str, ...]]:
         )
     mapping: dict[str, tuple[str, ...]] = {}
     for principal_id, channels in parsed.items():
-        if (
-            not isinstance(principal_id, str)
-            or not principal_id
-            or not isinstance(channels, list)
-        ):
+        if not isinstance(principal_id, str) or not principal_id or not isinstance(channels, list):
             raise HTTPException(
                 status_code=500,
                 detail=f"{CREATOR_CHANNEL_MAP_ENV} must map principal IDs to channel lists.",
             )
-        if not all(isinstance(channel, str) and _valid_channel_id(channel) for channel in channels):
+        if not all(isinstance(channel, str) and valid_channel_id(channel) for channel in channels):
             raise HTTPException(
                 status_code=500,
                 detail=f"{CREATOR_CHANNEL_MAP_ENV} contains an invalid channel ID.",
@@ -87,19 +63,26 @@ def _creator_channel_map() -> dict[str, tuple[str, ...]]:
 
 def _principal(role: str) -> Principal:
     principal_id = ROLE_PRINCIPALS[role]
-    channel_ids = (
-        _creator_channel_map().get(principal_id, ()) if role == "creator" else ()
-    )
+    channel_ids = _creator_channel_map().get(principal_id, ()) if role == "creator" else ()
     return Principal(id=principal_id, role=cast(Role, role), channel_ids=channel_ids)
 
 
 def _role_tokens() -> dict[str, str]:
-    role_to_token: dict[str, str] = {}
-    for role, env_name in ROLE_ENV.items():
-        value = os.getenv(env_name, "").strip()
-        if value:
-            role_to_token[role] = value
-    if len(set(role_to_token.values())) != len(role_to_token):
+    configured = {
+        role: os.getenv(env_name, "").strip() for role, env_name in ROLE_ENV.items()
+    }
+    present = {role: token for role, token in configured.items() if token}
+    if not present:
+        return {}
+    if len(present) != len(ROLE_ENV):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Set KEELTUBE_CREATOR_TOKEN, KEELTUBE_MODERATOR_TOKEN, and "
+                "KEELTUBE_APPEALS_TOKEN together, or use OIDC mode."
+            ),
+        )
+    if len(set(present.values())) != len(present):
         raise HTTPException(
             status_code=500,
             detail=(
@@ -107,7 +90,7 @@ def _role_tokens() -> dict[str, str]:
                 "KEELTUBE_APPEALS_TOKEN must be distinct."
             ),
         )
-    return {token: role for role, token in role_to_token.items()}
+    return {token: role for role, token in present.items()}
 
 
 def _authorization(request: Request) -> str:
@@ -119,41 +102,40 @@ def _authorization(request: Request) -> str:
 
 
 def _match(token: str, expected: str) -> bool:
-    return bool(token) and hmac.compare_digest(
-        token.encode("utf-8"), expected.encode("utf-8")
-    )
+    return bool(token) and hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
 
 
-def resolve_principal(
-    request: Request, required_roles: tuple[str, ...] | None = None
-) -> Principal:
+def resolve_principal(request: Request, required_roles: tuple[str, ...] | None = None) -> Principal:
+    oidc_config = OIDCConfig.from_env()
+    if oidc_config is not None:
+        principal = verify_oidc_token(request, oidc_config)
+        if required_roles is not None and principal.role not in required_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"One of these roles is required: {', '.join(required_roles)}.",
+            )
+        return principal
+
     role_tokens = _role_tokens()
+    if not role_tokens:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Moderation authentication is not configured. Set OIDC or all three "
+                "role tokens."
+            ),
+        )
+
     token = _authorization(request)
-
-    if role_tokens:
-        for configured, role in role_tokens.items():
-            if _match(token, configured):
-                if required_roles is not None and role not in required_roles:
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"One of these roles is required: {', '.join(required_roles)}.",
-                    )
-                return _principal(role)
-        raise HTTPException(status_code=401, detail="A valid role token is required.")
-
-    legacy = os.getenv(LEGACY_TOKEN_ENV, "").strip()
-    if legacy:
-        if not _match(token, legacy):
-            raise HTTPException(status_code=401, detail="A valid demo token is required.")
-        if required_roles:
-            return _principal(required_roles[0])
-        return _principal("operator")
-
-    # Open local demo mode. This is intentionally unauthenticated and must never be used on a
-    # network-exposed deployment.
-    if required_roles:
-        return _principal(required_roles[0])
-    return _principal("operator")
+    for configured, role in role_tokens.items():
+        if _match(token, configured):
+            if required_roles is not None and role not in required_roles:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"One of these roles is required: {', '.join(required_roles)}.",
+                )
+            return _principal(role)
+    raise HTTPException(status_code=401, detail="A valid role token is required.")
 
 
 def require_roles(*roles: str):

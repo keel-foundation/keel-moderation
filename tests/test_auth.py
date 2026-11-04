@@ -171,22 +171,4 @@ def test_role_tokens_must_be_distinct(client, monkeypatch):
     assert "must be distinct" in response.json()["detail"]
 
 
-def test_legacy_demo_token_still_simulates_the_flow(client, monkeypatch):
-    monkeypatch.setenv("KEELTUBE_DEMO_TOKEN", "legacy-token")
-    headers = {"Authorization": "Bearer legacy-token"}
 
-    assert client.post("/v1/actions", json=ACTION_PAYLOAD).status_code == 401
-    action = client.post("/v1/actions", json=ACTION_PAYLOAD, headers=headers).json()
-    assert client.get("/v1/creator/cases", headers=headers).status_code == 200
-    appeal = client.post(
-        f"/v1/actions/{action['id']}/appeal",
-        json=APPEAL_PAYLOAD,
-        headers=headers,
-    ).json()
-    decided = client.post(
-        f"/v1/appeals/{appeal['id']}/decide",
-        json=DECISION_PAYLOAD,
-        headers=headers,
-    )
-    assert decided.status_code == 200
-    assert decided.json()["appeal"]["reviewer"] == "demo-appeals-reviewer"

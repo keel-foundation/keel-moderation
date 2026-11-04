@@ -4,10 +4,10 @@ The moderation and content-protection service: signals, cases, human review, app
 ledger, and transparency aggregates.
 
 **Status:** local demo with durable workflow state. Cases, actions, and appeals are stored in
-SQLite; the audit ledger remains append-only JSONL. Role-separated creator, moderator, and
-appeals-reviewer tokens are supported. Creator-scoped case, action, appeal, summary, and ledger
-reads are implemented. There is no production authentication, real classifier, or public
-transparency generator yet.
+SQLite; the audit ledger remains append-only JSONL. OIDC claim verification and role-separated
+creator, moderator, and appeals-reviewer tokens are supported. Creator-scoped case, action, appeal,
+summary, and ledger reads are implemented. There is no real classifier or public transparency
+generator yet.
 
 ## Endpoints
 
@@ -39,22 +39,40 @@ transparency generator yet.
 
 ## Authentication and roles
 
-There are three modes. They are selected by environment variables at request time.
+There are two modes. They are selected by environment variables at request time. OIDC mode takes
+precedence when configured.
 
-### Open local mode (default)
+### OIDC mode
 
-No tokens are configured. Every endpoint is allowed and each endpoint acts as its fixed demo
-identity. This is for local development only. Never expose it to a network.
+Set `KEELTUBE_OIDC_ISSUER` to accept bearer JWTs and derive the principal from claims:
 
-### Legacy demo token
+| Variable | Default | Purpose |
+|---|---|---|
+| `KEELTUBE_OIDC_ISSUER` | unset | Enables OIDC mode; must match the token `iss` |
+| `KEELTUBE_OIDC_AUDIENCE` | unset | Optional expected `aud`; recommended |
+| `KEELTUBE_OIDC_JWKS_URL` | discovery | JWKS endpoint; defaults to issuer discovery |
+| `KEELTUBE_OIDC_HMAC_SECRET` | unset | Shared HS256 secret for core-minted claims |
+| `KEELTUBE_OIDC_ALGORITHMS` | `RS256,ES256` (or `HS256` with a secret) | Accepted JWT algorithms |
+| `KEELTUBE_OIDC_SUBJECT_CLAIM` | `sub` | Principal ID claim |
+| `KEELTUBE_OIDC_ROLE_CLAIM` | `role` | Role claim; one of `creator`, `moderator`, `appeals`, `operator` |
+| `KEELTUBE_OIDC_CHANNEL_CLAIM` | `channel_ids` | Channel scope claim; a string or list of `ch_*` IDs |
+| `KEELTUBE_OIDC_LEEWAY_SECONDS` | `60` | Clock skew allowance |
+| `KEELTUBE_OIDC_JWKS_CACHE_SECONDS` | `300` | JWKS and discovery cache lifetime |
 
-Set `KEELTUBE_DEMO_TOKEN`. The same bearer token simulates the whole flow, using the fixed demo
-identities (`creator:demo`, `demo-reviewer`, `demo-appeals-reviewer`). This keeps the existing
-web demo working.
+The issuer, signature, audience, expiry, and required `sub` claim are verified. A token with no
+recognized role or an invalid channel claim returns `403`; a missing, expired, or badly signed token
+returns `401`. Provider/JWKS failures return `503` (fail closed). When OIDC mode is enabled, the
+static role tokens are ignored.
 
-### Role-enforced mode
+The core creator moderation gateway uses this mode with `KEELTUBE_OIDC_ISSUER=keel-core`,
+`KEELTUBE_OIDC_AUDIENCE=keel-moderation`, `KEELTUBE_OIDC_ALGORITHMS=HS256`, and a shared
+`KEELTUBE_OIDC_HMAC_SECRET` of at least 32 characters. Core mints short-lived claims containing the
+real actor ID, role, and channel IDs from the authenticated session.
 
-Set all three tokens to distinct values:
+### Role-token mode
+
+Set all three tokens to distinct values. If neither OIDC nor role tokens are configured, every
+authenticated endpoint fails closed with `503`.
 
 | Variable | Role | Principal |
 |---|---|---|
@@ -70,10 +88,9 @@ Then:
 - listing appeals requires the moderator or appeals token;
 - creator-scoped read endpoints require the creator token.
 
-Creator channel scope is an authenticated principal claim. In the demo token authenticator, the
-claims come from `KEELTUBE_CREATOR_CHANNEL_MAP` (default `{"creator:demo":["ch_demo"]}`). Production
-OIDC or session authentication must supply the same `channel_ids` claim instead of reading this
-environment variable.
+Creator channel scope is an authenticated principal claim. In OIDC mode it comes from the
+`channel_ids` claim. In role-token mode, it comes from `KEELTUBE_CREATOR_CHANNEL_MAP` (default
+`{"creator:demo":["ch_demo"]}`). Production must use OIDC claims.
 
 Creator endpoints accept an optional `channel_id` query parameter. A single-channel principal can
 omit it; a multi-channel principal must provide it; a channel outside the principal's claim returns
@@ -85,7 +102,8 @@ The service enforces reviewer independence:
 - the original decision-maker cannot decide the appeal;
 - a role token can only call the endpoints allowed for its role.
 
-The role tokens must be distinct. If they are not, requests fail with a configuration error.
+Set all three role tokens or none. They must be distinct; otherwise requests fail with a
+configuration error.
 
 Read endpoints (`/v1/demo/state`, `/v1/ledger`, `/v1/ledger/verify`, and
 `/v1/ledger/export`) remain unauthenticated in this local demo. Do not expose them to a shared or
@@ -123,8 +141,17 @@ public network. The `/v1/creator/*` endpoints are authorized and channel-scoped.
 | `KEELTUBE_STATE_DB` | `data/state.sqlite3` | SQLite workflow state |
 | `KEELTUBE_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
 | `KEELTUBE_RATE_LIMIT` | `30` | Mutating requests per IP per minute; `0` disables |
-| `KEELTUBE_CREATOR_CHANNEL_MAP` | `{"creator:demo":["ch_demo"]}` | Demo principal-to-channel claims |
-| `KEELTUBE_DEMO_TOKEN` | unset | Legacy single-token demo mode |
+| `KEELTUBE_OIDC_ISSUER` | unset | Enables OIDC mode |
+| `KEELTUBE_OIDC_AUDIENCE` | unset | Expected OIDC audience |
+| `KEELTUBE_OIDC_JWKS_URL` | issuer discovery | JWKS endpoint |
+| `KEELTUBE_OIDC_HMAC_SECRET` | unset | Shared HS256 secret for core-minted claims |
+| `KEELTUBE_OIDC_ALGORITHMS` | `RS256,ES256` or `HS256` | Accepted JWT algorithms |
+| `KEELTUBE_OIDC_SUBJECT_CLAIM` | `sub` | Principal ID claim |
+| `KEELTUBE_OIDC_ROLE_CLAIM` | `role` | Role claim |
+| `KEELTUBE_OIDC_CHANNEL_CLAIM` | `channel_ids` | Channel scope claim |
+| `KEELTUBE_OIDC_LEEWAY_SECONDS` | `60` | Clock skew allowance |
+| `KEELTUBE_OIDC_JWKS_CACHE_SECONDS` | `300` | JWKS/discovery cache lifetime |
+| `KEELTUBE_CREATOR_CHANNEL_MAP` | `{"creator:demo":["ch_demo"]}` | Role-token channel claims |
 | `KEELTUBE_CREATOR_TOKEN` | unset | Creator token for role-enforced mode |
 | `KEELTUBE_MODERATOR_TOKEN` | unset | Moderator token for role-enforced mode |
 | `KEELTUBE_APPEALS_TOKEN` | unset | Appeals reviewer token for role-enforced mode |
