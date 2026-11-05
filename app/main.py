@@ -25,6 +25,7 @@ from .classifiers import classifier_from_env
 from .notifications import notify_channel_async
 from .principals import Principal, actor_payload
 from .storage import create_store
+from .transparency import build_report, export_csv, export_json, export_markdown
 
 
 def env_list(name: str, default: str) -> list[str]:
@@ -54,6 +55,7 @@ DEMO_POLICY = {
 
 DEFAULT_LEDGER_PATH = "data/ledger.jsonl"
 DEFAULT_STATE_DB = "data/state.sqlite3"
+TRANSPARENCY_MAX_RECORDS = 1_000_000
 MODERATION_DATABASE_ENVS = (
     "KEELTUBE_MODERATION_DATABASE_URL",
     "KEELTUBE_DATABASE_URL",
@@ -872,6 +874,29 @@ class DemoState:
     def verify_ledger(self) -> dict:
         return self.ledger.verify()
 
+    def transparency(
+        self,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> dict:
+        from .transparency import _parse_bound
+
+        with self.lock:
+            cases, _ = self.store.list_cases(limit=TRANSPARENCY_MAX_RECORDS, offset=0)
+            actions, _ = self.store.list_actions(limit=TRANSPARENCY_MAX_RECORDS, offset=0)
+            appeals = self.store.list_appeals()
+            report = build_report(
+                cases=cases,
+                actions=actions,
+                appeals=appeals,
+                ledger=deepcopy(self.ledger.records),
+                verification=self.ledger.verify(),
+                policy_version=DEMO_POLICY["policy_version"],
+                start=_parse_bound(since, end=False),
+                end=_parse_bound(until, end=True),
+            )
+            return report
+
 
 def state_location_from_env() -> str:
     for name in MODERATION_DATABASE_ENVS:
@@ -942,6 +967,42 @@ def public_video_record(video_id: str) -> dict:
 @app.get("/v1/policies", response_model=PolicySummary)
 def policies() -> PolicySummary:
     return PolicySummary(policies=[DEMO_POLICY])
+
+
+@app.get("/v1/transparency")
+def transparency(
+    since: Optional[str] = Query(None, max_length=40),
+    until: Optional[str] = Query(None, max_length=40),
+) -> dict:
+    """Public transparency report generated from workflow state and the ledger."""
+
+    return state.transparency(since=since, until=until)
+
+
+@app.get("/v1/transparency/export")
+def transparency_export(
+    format: Literal["json", "csv", "markdown"] = "json",
+    since: Optional[str] = Query(None, max_length=40),
+    until: Optional[str] = Query(None, max_length=40),
+) -> Response:
+    report = state.transparency(since=since, until=until)
+    if format == "csv":
+        content = export_csv(report)
+        media_type = "text/csv"
+        filename = "transparency.csv"
+    elif format == "markdown":
+        content = export_markdown(report)
+        media_type = "text/markdown"
+        filename = "transparency.md"
+    else:
+        content = export_json(report)
+        media_type = "application/json"
+        filename = "transparency.json"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/v1/demo/state")

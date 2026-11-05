@@ -9,7 +9,8 @@ fallback. The audit ledger remains append-only JSONL. OIDC claim verification an
 creator, moderator, and appeals-reviewer tokens are supported. Creator-scoped case, action, appeal,
 summary, and ledger reads, staff review endpoints, signal ingestion, creator notifications, and the
 contract tests are implemented. `keel-moderation-web` is the staff portal that consumes the staff
-endpoints. There is no real classifier or public transparency generator yet.
+endpoints. A bundled model-based classifier, optional transformer and HTTP classifier adapters,
+and a public transparency report generator are implemented.
 
 `pytest` and `ruff check app tests` pass. Set `KEELTUBE_TEST_DATABASE_URL` to also run the
 PostgreSQL persistence test; it skips when no test database is configured.
@@ -20,6 +21,8 @@ PostgreSQL persistence test; it skips when no test database is configured.
 |---|---|---|
 | `GET` | `/health` | Liveness |
 | `GET` | `/v1/policies` | Active demo policy |
+| `GET` | `/v1/transparency` | Public transparency report (`since`, `until`) |
+| `GET` | `/v1/transparency/export?format=json\|csv\|markdown` | Export the transparency report |
 | `GET` | `/v1/demo/state` | Current action, appeal, case, ledger, verification |
 | `POST` | `/v1/demo/reset` | Clear workflow state and append a reset record |
 | `GET` | `/v1/whoami` | Resolve the current principal and role |
@@ -50,6 +53,20 @@ PostgreSQL persistence test; it skips when no test database is configured.
 | `GET` | `/v1/ledger` | Ledger and verification result |
 | `GET` | `/v1/ledger/verify` | Verify the hash chain |
 | `GET` | `/v1/ledger/export?format=jsonl\|csv` | Export the ledger |
+
+## Public transparency
+
+`GET /v1/transparency` is unauthenticated and is generated from the workflow store and the audit
+ledger, not hand-edited. The report follows the Constitution's Schedule D where this service holds
+the data: enforcement actions by policy/type/source, automation and user-report shares, appeal
+volume, median and p95 decision time, reversal rates, category counts for piracy, copyright, spam,
+scam, impersonation, harassment, csam, and terrorism, demonetization reversals, ledger validity,
+methodology, and limitations. Fields owned by other services (finance, legal orders, security
+incidents, Ombudsperson complaints, the Creator Trust Index) are explicitly reported as unavailable
+rather than estimated.
+
+Period filters accept ISO dates or timestamps. `format=json`, `format=csv`, and `format=markdown`
+are supported on the export route.
 
 ## Authentication and roles
 
@@ -183,6 +200,11 @@ record and decide pending appeals. The portal never exposes a moderation token t
 | `KEELTUBE_SIGNAL_INGEST_TOKEN` | unset | Service token for `POST /v1/signals`; unset disables the route |
 | `KEELTUBE_CORE_URL` | unset | Core base URL for creator notification delivery |
 | `KEELTUBE_CORE_INTERNAL_TOKEN` | unset | Core internal notification token |
+| `KEELTUBE_CLASSIFIER_BACKEND` | `auto` | `auto`, `linear`, `transformers`, `http`, or `deterministic` |
+| `KEELTUBE_CLASSIFIER_MODEL` | unset | Hugging Face model id for the `transformers` backend |
+| `KEELTUBE_CLASSIFIER_LABEL_MAP` | built-in map | JSON object mapping model labels to signal types |
+| `KEELTUBE_CLASSIFIER_MIN_CONFIDENCE` | `0.35` | Minimum probability for a non-`other` signal |
+| `KEELTUBE_CLASSIFIER_DEVICE` | `-1` | Transformers device (`-1` CPU, `0` first GPU) |
 | `KEELTUBE_CLASSIFIER_URL` | unset | Optional external classifier endpoint |
 | `KEELTUBE_CLASSIFIER_TOKEN` | unset | Optional classifier bearer token |
 | `KEELTUBE_CLASSIFIER_TIMEOUT_SECONDS` | `5` | Classifier request timeout |
@@ -203,8 +225,11 @@ python3 -m venv .venv
 
 Moderation sends best-effort creator notifications to core on new signals, enforcement actions, and
 appeal decisions when `KEELTUBE_CORE_URL` and `KEELTUBE_CORE_INTERNAL_TOKEN` are configured. Signals
-use the external classifier when `KEELTUBE_CLASSIFIER_URL` is set; otherwise the deterministic
-keyword classifier fills signal type, confidence, and model version.
+use the configured classifier backend. By default the bundled linear model fills signal type,
+confidence, and model version. Set `KEELTUBE_CLASSIFIER_BACKEND=transformers` with
+`KEELTUBE_CLASSIFIER_MODEL` to use a production Hugging Face model, or set
+`KEELTUBE_CLASSIFIER_URL` for an external service. The deterministic keyword classifier remains an
+explicit fallback.
 
 The devstack runs `python -m app.seed` before moderation starts. The seed is idempotent and creates
 a deterministic case/action/appeal/ledger record for `ch_demo`; run it manually with:
@@ -225,8 +250,8 @@ is absent, the contract tests skip.
 1. Move the ledger to PostgreSQL with a signed periodic external anchor.
 2. Add the policy bundle loader and signed policy versioning.
 3. Add SLA timers and escalation to the review queue.
-4. Add production classifier models and richer signal correlation.
-5. Add the public transparency report generator.
+4. Add richer signal correlation and model calibration/red-team evaluation.
+5. Move the public transparency report to a signed, externally archived artifact.
 
 ## Licensing
 

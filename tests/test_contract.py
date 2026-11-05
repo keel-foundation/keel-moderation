@@ -38,6 +38,9 @@ STATE_POINTER = "/components/schemas/DemoState"
 LEDGER_POINTER = "/paths/~1v1~1ledger/get/responses/200/content/application~1json/schema"
 VERIFY_POINTER = "/paths/~1v1~1ledger~1verify/get/responses/200/content/application~1json/schema"
 WHOAMI_POINTER = "/paths/~1v1~1whoami/get/responses/200/content/application~1json/schema"
+TRANSPARENCY_POINTER = (
+    "/paths/~1v1~1transparency/get/responses/200/content/application~1json/schema"
+)
 APPEALS_POINTER = "/paths/~1v1~1appeals/get/responses/200/content/application~1json/schema"
 
 
@@ -267,3 +270,10 @@ def test_public_video_record_matches_openapi(client, registry):
     validate_pointer(registry, "/components/schemas/PublicVideoRecord", payload)
     validate_schema(registry, "moderation-case.schema.json", payload["cases"][0])
     validate_schema(registry, "enforcement-action.schema.json", payload["actions"][0])
+
+
+def test_transparency_matches_openapi(client, registry):
+    create_action(client)
+    report = client.get("/v1/transparency").json()
+    validate_pointer(registry, TRANSPARENCY_POINTER, report)
+    assert report["ledger"]["valid"] is True

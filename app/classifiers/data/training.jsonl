@@ -1,0 +1,54 @@
+{"text": "This channel keeps reposting the same clip every hour with slightly different titles.", "label": "spam"}
+{"text": "Buy cheap followers and boost your views instantly with our bot network.", "label": "spam"}
+{"text": "Mass produced slideshow uploaded hundreds of times a day to game the feed.", "label": "spam"}
+{"text": "Click the link in the description to claim your free giveaway now now now.", "label": "spam"}
+{"text": "Automated account posting identical comments on every video.", "label": "spam"}
+{"text": "Low quality reupload with a misleading thumbnail and keyword stuffing.", "label": "spam"}
+{"text": "Send me your seed phrase and I will double your crypto investment.", "label": "scam"}
+{"text": "This investment platform guarantees profit if you pay the activation fee.", "label": "scam"}
+{"text": "Fake charity account collecting donations for a disaster that never happened.", "label": "scam"}
+{"text": "Phishing page asks viewers to confirm their password and bank details.", "label": "scam"}
+{"text": "Fake job offer requires a gift card payment before you can start.", "label": "scam"}
+{"text": "Romance scam account asks for money after moving the chat off platform.", "label": "scam"}
+{"text": "This is the full movie ripped from a streaming service without a license.", "label": "piracy"}
+{"text": "Uploaded the entire copyrighted concert with no permission from the rights holder.", "label": "piracy"}
+{"text": "Reupload of a paid course that is normally behind a subscription.", "label": "piracy"}
+{"text": "Download link for pirated software and cracked activation keys.", "label": "piracy"}
+{"text": "Stolen footage from another creator reposted without credit or a license.", "label": "piracy"}
+{"text": "Full sports broadcast recorded and shared illegally during the event.", "label": "piracy"}
+{"text": "The video uses unlicensed music owned by a major label.", "label": "copyright"}
+{"text": "DMCA takedown notice for footage that matches a registered film.", "label": "copyright"}
+{"text": "Copyright claim: the clip includes a copyrighted broadcast without clearance.", "label": "copyright"}
+{"text": "This upload includes a licensed track that was never cleared for reuse.", "label": "copyright"}
+{"text": "The creator copied a documentary sequence frame for frame.", "label": "copyright"}
+{"text": "Unlicensed stock footage appears in the final cut of this video.", "label": "copyright"}
+{"text": "This account is impersonating a famous creator and using their logo.", "label": "impersonation"}
+{"text": "Fake account pretends to be the official brand support channel.", "label": "impersonation"}
+{"text": "Someone created a copy of my channel and is posing as me to viewers.", "label": "impersonation"}
+{"text": "The profile uses another person's name, photo, and verified badge styling.", "label": "impersonation"}
+{"text": "Impersonating a government official to publish fake announcements.", "label": "impersonation"}
+{"text": "Fan account is pretending to speak for the artist and asking for money.", "label": "impersonation"}
+{"text": "Targeted harassment and threats against a named person in the comments.", "label": "harassment"}
+{"text": "This video incites viewers to abuse and doxx the subject.", "label": "harassment"}
+{"text": "Repeated abusive messages telling the creator to hurt themselves.", "label": "harassment"}
+{"text": "Coordinated campaign to harass a creator across every upload.", "label": "harassment"}
+{"text": "The commenter posted threats and personal address details.", "label": "harassment"}
+{"text": "Bullying and targeted abuse aimed at a minor in the replies.", "label": "harassment"}
+{"text": "Sexualized imagery involving a child must be removed immediately.", "label": "csam"}
+{"text": "The upload contains child sexual abuse material.", "label": "csam"}
+{"text": "Report of sexual content involving a minor.", "label": "csam"}
+{"text": "Account is sharing exploitative images of children.", "label": "csam"}
+{"text": "This video depicts a child in a sexualized context.", "label": "csam"}
+{"text": "Suspected child exploitation material in the attached clip.", "label": "csam"}
+{"text": "Video praises a terrorist organization and calls for violence.", "label": "terrorism"}
+{"text": "Extremist propaganda recruiting viewers to commit attacks.", "label": "terrorism"}
+{"text": "Instructions for building a bomb and targeting civilians.", "label": "terrorism"}
+{"text": "The channel publishes terrorist manifestos and attack planning.", "label": "terrorism"}
+{"text": "Content glorifies terrorism and incites violent extremism.", "label": "terrorism"}
+{"text": "Recruitment video for an extremist group with threats of violence.", "label": "terrorism"}
+{"text": "I disagree with the editorial choice in this review.", "label": "other"}
+{"text": "The audio is a little quiet compared to the previous episode.", "label": "other"}
+{"text": "Can you add chapters to the description for this tutorial?", "label": "other"}
+{"text": "The thumbnail does not match the topic but the video is fine.", "label": "other"}
+{"text": "Please fix the captions because the timing is slightly off.", "label": "other"}
+{"text": "This documentary has an interesting perspective on city planning.", "label": "other"}
